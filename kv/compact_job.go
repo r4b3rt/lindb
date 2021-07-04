@@ -18,6 +18,7 @@
 package kv
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/lindb/lindb/kv/table"
@@ -51,7 +52,7 @@ func newCompactJob(family Family, state *compactionState, rollup Rollup) Compact
 	}
 }
 
-// run runs compact job
+// Run runs compact job
 func (c *compactJob) Run() error {
 	compaction := c.state.compaction
 	switch {
@@ -81,7 +82,8 @@ func (c *compactJob) moveCompaction() {
 
 // mergeCompaction merges input files to up level
 func (c *compactJob) mergeCompaction() (err error) {
-	kvLogger.Info("starting compaction job, do merge compaction", logger.String("family", c.family.familyInfo()))
+	kvLogger.Info("starting compaction job, do merge compaction",
+		logger.String("family", c.family.familyInfo()))
 	defer func() {
 		// cleanup compaction context, include temp pending output files
 		c.cleanupCompaction()
@@ -242,16 +244,14 @@ func (c *compactJob) finishCompactionOutputFile() (err error) {
 		}
 	}()
 	if builder == nil {
-		err = fmt.Errorf("store build is nil")
-		return err
+		return errors.New("store build is nil")
 	}
 	if builder.Count() == 0 {
 		// if no data after compact
 		return err
 	}
-	if err := builder.Close(); err != nil {
-		err = fmt.Errorf("close table builder error when compaction job, error:%s", err)
-		return err
+	if err = builder.Close(); err != nil {
+		return fmt.Errorf("close table builder error when compaction job, error:%w", err)
 	}
 	fileMeta := version.NewFileMeta(builder.FileNumber(), builder.MinKey(), builder.MaxKey(), builder.Size())
 	c.state.addOutputFile(fileMeta)

@@ -26,6 +26,7 @@ import (
 
 	"github.com/OneOfOne/xxhash"
 	"github.com/gogo/protobuf/proto"
+	"github.com/klauspost/compress/gzip"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -43,7 +44,10 @@ var (
 var pushLogger = logger.GetLogger("monitoring", "Pusher")
 
 var separatorByteSlice = []byte{model.SeparatorByte} // For convenient use with xxhash.
-const contentTypeHeader = "Content-Type"
+const (
+	contentTypeHeader     = "Content-Type"
+	contentEncodingHeader = "Content-Encoding"
+)
 
 // PrometheusPusher represents a pusher,
 // collects metrics from prometheus registry, then pushes metrics data via http.
@@ -88,7 +92,8 @@ type prometheusPusher struct {
 }
 
 // NewPrometheusPusher creates a new prometheus pusher
-func NewPrometheusPusher(ctx context.Context,
+func NewPrometheusPusher(
+	ctx context.Context,
 	endpoint string,
 	interval time.Duration,
 	gatherers prometheus.Gatherers,
@@ -122,7 +127,7 @@ func (p *prometheusPusher) Start() {
 		case <-ticker.C:
 			p.run()
 		case <-p.ctx.Done():
-			pushLogger.Info("stop push prometheus metric data via http")
+			pushLogger.Info("stop prometheus pusher")
 			return
 		}
 	}
@@ -144,28 +149,32 @@ func (p *prometheusPusher) run() {
 	}
 	// 2. encode metric, calc delta value if need calc delta
 	buf := &bytes.Buffer{}
-	enc := expfmt.NewEncoder(buf, p.expfmt)
+	var enc expfmt.Encoder
+
+	gzipWriter := gzip.NewWriter(buf)
+	enc = expfmt.NewEncoder(gzipWriter, p.expfmt)
+
 	for _, mf := range mfs {
 		if p.needCalcDelta(mf.GetType()) {
 			p.metricFamilies[mf.GetName()] = p.calcDelta(mf)
 		}
-
 		// add global labels
 		for _, m := range mf.GetMetric() {
 			m.Label = append(m.Label, p.globalLabels...)
 		}
-
 		if err = p.encodeFunc(enc, mf); err != nil {
 			pushLogger.Error("encode prometheus metric error", logger.Error(err))
 		}
 	}
+	_ = gzipWriter.Close()
+
 	// 3. new metric write request
 	req, err := p.newRequest("PUT", p.endpoint, buf)
 	if err != nil {
 		pushLogger.Error("new write monitoring request error", logger.Error(err))
 		return
 	}
-	//TODO add gzip compress????
+	req.Header.Set(contentEncodingHeader, "gzip")
 	req.Header.Add(contentTypeHeader, string(p.expfmt))
 
 	// 4. send metric data
@@ -232,7 +241,6 @@ func (p *prometheusPusher) calcDeltaCounter(new, old *dto.Metric) *dto.Metric {
 	}
 
 	new.Counter.Value = proto.Float64(new.Counter.GetValue() - old.Counter.GetValue())
-
 	return metric
 }
 
@@ -291,7 +299,7 @@ func gather(gatherers prometheus.Gatherers) ([]*dto.MetricFamily, error) {
 	return gatherers.Gather()
 }
 
-// encode encodes metric families into an underlying wire protocol.
+// encode encodes metric families into an underlying wire prometheus.
 func encode(enc expfmt.Encoder, mf *dto.MetricFamily) error {
 	return enc.Encode(mf)
 }

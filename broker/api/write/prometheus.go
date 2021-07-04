@@ -15,58 +15,68 @@
 // specific language governing permissions and limitations
 // under the License.
 
-package write
+package write //nolint:dupl
 
 import (
-	"io/ioutil"
-	"net/http"
+	"github.com/gin-gonic/gin"
 
-	"github.com/lindb/lindb/broker/api"
+	"github.com/lindb/lindb/broker/deps"
 	"github.com/lindb/lindb/constants"
-	"github.com/lindb/lindb/protocol"
-	"github.com/lindb/lindb/replication"
+	ingestCommon "github.com/lindb/lindb/ingestion/common"
+	"github.com/lindb/lindb/ingestion/prometheus"
+	"github.com/lindb/lindb/pkg/http"
 )
 
-// for testing
 var (
-	readAllFunc = ioutil.ReadAll
+	PrometheusWritePath = "/metric/prometheus"
 )
 
-// PrometheusWrite represents support prometheus text protocol
-type PrometheusWrite struct {
-	cm replication.ChannelManager
+// PrometheusWriter processes prometheus text protocol.
+type PrometheusWriter struct {
+	deps *deps.HTTPDeps
 }
 
-// NewPrometheusWrite creates prometheus write
-func NewPrometheusWrite(cm replication.ChannelManager) *PrometheusWrite {
-	return &PrometheusWrite{
-		cm: cm,
+// NewPrometheusWriter creates prometheus writer.
+func NewPrometheusWriter(deps *deps.HTTPDeps) *PrometheusWriter {
+	return &PrometheusWriter{
+		deps: deps,
 	}
 }
 
-// Write parses prometheus text protocol then writes data into wal
-func (m *PrometheusWrite) Write(w http.ResponseWriter, r *http.Request) {
-	databaseName, err := api.GetParamsFromRequest("db", r, "", true)
+// Register adds prometheus write url route.
+func (m *PrometheusWriter) Register(route gin.IRoutes) {
+	route.PUT(PrometheusWritePath, m.Write)
+}
+
+// Write parses prometheus text protocol then writes data into wal.
+func (m *PrometheusWriter) Write(c *gin.Context) {
+	var param struct {
+		Database  string `form:"db" binding:"required"`
+		Namespace string `form:"ns"`
+	}
+	err := c.ShouldBindQuery(&param)
 	if err != nil {
-		api.Error(w, err)
+		http.Error(c, err)
 		return
 	}
-	_, _ = api.GetParamsFromRequest("ns", r, constants.DefaultNamespace, false)
-	s, err := readAllFunc(r.Body)
+	if param.Namespace == "" {
+		param.Namespace = constants.DefaultNamespace
+	}
+
+	enrichedTags, err := ingestCommon.ExtractEnrichTags(c.Request)
 	if err != nil {
-		api.Error(w, err)
+		http.Error(c, err)
+		return
+	}
+	metricList, err := prometheus.Parse(c.Request, enrichedTags, param.Namespace)
+	if err != nil {
+		http.Error(c, err)
 		return
 	}
 
-	metricList, err := protocol.PromParse(s)
-	if err != nil {
-		api.Error(w, err)
+	if err := m.deps.CM.Write(param.Database, metricList); err != nil {
+		http.Error(c, err)
 		return
 	}
-
-	if err := m.cm.Write(databaseName, metricList); err != nil {
-		api.Error(w, err)
-		return
-	}
-	api.OK(w, "success")
+	http.NoContent(c)
 }

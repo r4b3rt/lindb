@@ -29,7 +29,8 @@ import (
 )
 
 const (
-	standaloneCfgName = "standalone.toml"
+	standaloneCfgName     = "standalone.toml"
+	standaloneLogFileName = "lind-standalone.log"
 	// DefaultStandaloneCfgFile defines default config file path for standalone mode
 	defaultStandaloneCfgFile = "./" + standaloneCfgName
 )
@@ -38,7 +39,7 @@ const (
 func newStandaloneCmd() *cobra.Command {
 	standaloneCmd := &cobra.Command{
 		Use:   "standalone",
-		Short: "Run as the standalone mode(embed broker/storage/etcd)",
+		Short: "Run as a standalone node with embed broker, storage, etcd)",
 	}
 
 	standaloneCmd.AddCommand(
@@ -56,7 +57,7 @@ func newStandaloneCmd() *cobra.Command {
 
 var runStandaloneCmd = &cobra.Command{
 	Use:   "run",
-	Short: "run as the standalone mode",
+	Short: "run as standalone mode",
 	RunE:  serveStandalone,
 }
 
@@ -84,12 +85,12 @@ func serveStandalone(cmd *cobra.Command, args []string) error {
 	if err := ltoml.LoadConfig(cfg, defaultStandaloneCfgFile, &standaloneCfg); err != nil {
 		return fmt.Errorf("decode config file error: %s", err)
 	}
-	if err := logger.InitLogger(standaloneCfg.Logging); err != nil {
+	if err := logger.InitLogger(standaloneCfg.Logging, standaloneLogFileName); err != nil {
 		return fmt.Errorf("init logger error: %s", err)
 	}
 
 	// run cluster as standalone mode
-	runtime := standalone.NewStandaloneRuntime(getVersion(), standaloneCfg)
+	runtime := standalone.NewStandaloneRuntime(getVersion(), &standaloneCfg)
 	if err := run(ctx, runtime); err != nil {
 		return err
 	}

@@ -53,10 +53,19 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(memStatGauge)
-	prometheus.MustRegister(cpuStatGauge)
-	prometheus.MustRegister(diskUsageStatGauge)
-	prometheus.MustRegister(netStatCounter)
+	BrokerRegistry.MustRegister(memStatGauge)
+	BrokerRegistry.MustRegister(cpuStatGauge)
+	BrokerRegistry.MustRegister(diskUsageStatGauge)
+	BrokerRegistry.MustRegister(netStatCounter)
+	BrokerRegistry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	BrokerRegistry.MustRegister(prometheus.NewGoCollector())
+
+	StorageRegistry.MustRegister(memStatGauge)
+	StorageRegistry.MustRegister(cpuStatGauge)
+	StorageRegistry.MustRegister(diskUsageStatGauge)
+	StorageRegistry.MustRegister(netStatCounter)
+	StorageRegistry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	StorageRegistry.MustRegister(prometheus.NewGoCollector())
 }
 
 // SystemCollector collects the system stat
@@ -64,12 +73,12 @@ type SystemCollector struct {
 	ctx             context.Context
 	interval        time.Duration
 	storage         string
-	repository      state.Repository              // data will be putted to this
 	path            string                        // repository key
 	netStats        map[string]net.IOCountersStat // interface-name as key
 	netStatsUpdated map[string]time.Time          // last updated time
 	systemStat      *models.SystemStat
 	nodeStat        *models.NodeStat
+	repository      state.Repository
 	// used for mock
 	MemoryStatGetter    MemoryStatGetter
 	CPUStatGetter       CPUStatGetter
@@ -130,16 +139,16 @@ func (r *SystemCollector) collect() {
 	r.systemStat.CPUs = GetCPUs()
 
 	if r.systemStat.MemoryStat, err = r.MemoryStatGetter(); err != nil {
-		log.Error("get memory stat", logger.Error(err))
+		collectorLogger.Error("get memory stat", logger.Error(err))
 	}
 	if r.systemStat.CPUStat, err = r.CPUStatGetter(); err != nil {
-		log.Error("get cpu stat", logger.Error(err))
+		collectorLogger.Error("get cpu stat", logger.Error(err))
 	}
 	if r.systemStat.DiskUsageStat, err = r.DiskUsageStatGetter(r.ctx, r.storage); err != nil {
-		log.Error("get disk usage stat", logger.Error(err))
+		collectorLogger.Error("get disk usage stat", logger.Error(err))
 	}
 	if stats, err := r.NetStatGetter(r.ctx); err != nil {
-		log.Error("get net stat", logger.Error(err))
+		collectorLogger.Error("get net stat", logger.Error(err))
 	} else {
 		for _, stat := range stats {
 			r.netStats[stat.Name] = stat
@@ -155,7 +164,7 @@ func (r *SystemCollector) collect() {
 	r.logNetStat()
 
 	if err := r.repository.Put(r.ctx, r.path, encoding.JSONMarshal(r.nodeStat)); err != nil {
-		log.Error("report stat error", logger.String("path", r.path))
+		collectorLogger.Error("report stat error", logger.String("path", r.path))
 	}
 }
 
@@ -191,10 +200,10 @@ func (r *SystemCollector) logDiskUsageStat() {
 		diskUsageStatGauge.WithLabelValues("free").Set(float64(stat.Free))
 		diskUsageStatGauge.WithLabelValues("used_percent").Set(stat.UsedPercent)
 		// inode
-		diskUsageStatGauge.WithLabelValues("inodesFree").Set(float64(stat.InodesFree))
-		diskUsageStatGauge.WithLabelValues("inodesUsed").Set(float64(stat.InodesUsed))
-		diskUsageStatGauge.WithLabelValues("inodesTotal").Set(float64(stat.InodesTotal))
-		diskUsageStatGauge.WithLabelValues("inodesUsedPercent").Set(stat.InodesUsedPercent)
+		diskUsageStatGauge.WithLabelValues("inodes_free").Set(float64(stat.InodesFree))
+		diskUsageStatGauge.WithLabelValues("inodes_used").Set(float64(stat.InodesUsed))
+		diskUsageStatGauge.WithLabelValues("inodes_total").Set(float64(stat.InodesTotal))
+		diskUsageStatGauge.WithLabelValues("inodes_used_percent").Set(stat.InodesUsedPercent)
 	}
 }
 func (r *SystemCollector) logNetStat() {
@@ -202,10 +211,10 @@ func (r *SystemCollector) logNetStat() {
 		lastStat, ok := r.netStats[stat.Name]
 		// check time interval
 		if ok && time.Since(r.netStatsUpdated[stat.Name]) <= 2*r.interval {
-			netStatCounter.WithLabelValues("bytesSent", stat.Name).Add(float64(stat.BytesSent - lastStat.BytesSent))
-			netStatCounter.WithLabelValues("bytesRecv", stat.Name).Add(float64(stat.BytesRecv - lastStat.BytesRecv))
-			netStatCounter.WithLabelValues("packetsSent", stat.Name).Add(float64(stat.PacketsSent - lastStat.PacketsSent))
-			netStatCounter.WithLabelValues("packetsRecv", stat.Name).Add(float64(stat.PacketsRecv - lastStat.PacketsRecv))
+			netStatCounter.WithLabelValues("bytes_sent", stat.Name).Add(float64(stat.BytesSent - lastStat.BytesSent))
+			netStatCounter.WithLabelValues("bytes_recv", stat.Name).Add(float64(stat.BytesRecv - lastStat.BytesRecv))
+			netStatCounter.WithLabelValues("packets_sent", stat.Name).Add(float64(stat.PacketsSent - lastStat.PacketsSent))
+			netStatCounter.WithLabelValues("packets_recv", stat.Name).Add(float64(stat.PacketsRecv - lastStat.PacketsRecv))
 			netStatCounter.WithLabelValues("errin", stat.Name).Add(float64(stat.Errin - lastStat.Errin))
 			netStatCounter.WithLabelValues("errout", stat.Name).Add(float64(stat.Errout - lastStat.Errout))
 			netStatCounter.WithLabelValues("dropin", stat.Name).Add(float64(stat.Dropin - lastStat.Dropin))

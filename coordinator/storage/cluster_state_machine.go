@@ -31,6 +31,7 @@ import (
 	"github.com/lindb/lindb/coordinator/task"
 	"github.com/lindb/lindb/pkg/encoding"
 	"github.com/lindb/lindb/pkg/logger"
+	"github.com/lindb/lindb/pkg/ltoml"
 	"github.com/lindb/lindb/pkg/state"
 	"github.com/lindb/lindb/service"
 )
@@ -226,6 +227,10 @@ func (c *clusterStateMachine) addCluster(resource []byte) {
 	// shutdown old cluster state machine if exist
 	c.deleteCluster(cfg.Name)
 
+	//TODO need add config, and retry???
+	cfg.Config.Timeout = ltoml.Duration(10 * time.Second)
+	cfg.Config.DialTimeout = ltoml.Duration(5 * time.Second)
+
 	repo, err := c.repoFactory.CreateRepo(cfg.Config)
 	if err != nil {
 		c.log.Error("new state repo error when create cluster",
@@ -240,6 +245,7 @@ func (c *clusterStateMachine) addCluster(resource []byte) {
 		controllerFactory:   c.controllerFactory,
 		factory:             discovery.NewFactory(repo),
 		shardAssignService:  c.shardAssignService,
+		logger:              c.log,
 	}
 	cluster, err := c.clusterFactory.newCluster(clusterCfg)
 	if err != nil {

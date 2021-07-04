@@ -22,22 +22,13 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
-	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	promreporter "github.com/uber-go/tally/prometheus"
 
 	"github.com/lindb/lindb/broker/api"
-	"github.com/lindb/lindb/broker/api/admin"
-	masterAPI "github.com/lindb/lindb/broker/api/cluster"
-	writeAPI "github.com/lindb/lindb/broker/api/metric"
-	queryAPI "github.com/lindb/lindb/broker/api/query"
-	stateAPI "github.com/lindb/lindb/broker/api/state"
-	"github.com/lindb/lindb/broker/api/write"
-	"github.com/lindb/lindb/broker/middleware"
+	"github.com/lindb/lindb/broker/deps"
 	"github.com/lindb/lindb/config"
 	"github.com/lindb/lindb/constants"
 	"github.com/lindb/lindb/coordinator"
@@ -81,49 +72,28 @@ type factory struct {
 	taskServer rpc.TaskServerFactory
 }
 
-// apiHandler represents all api handlers for broker
-type apiHandler struct {
-	storageClusterAPI  *admin.StorageClusterAPI
-	databaseAPI        *admin.DatabaseAPI
-	databaseFlusherAPI *admin.DatabaseFlusherAPI
-	loginAPI           *api.LoginAPI
-	storageStateAPI    *stateAPI.StorageAPI
-	brokerStateAPI     *stateAPI.BrokerAPI
-	masterAPI          *masterAPI.MasterAPI
-	metricAPI          *queryAPI.MetricAPI
-	metadataAPI        *queryAPI.MetadataAPI
-	writeAPI           *writeAPI.WriteAPI
-	prometheusWriter   *write.PrometheusWrite
-}
-
 type rpcHandler struct {
 	task *parallel.TaskHandler
-}
-
-type middlewareHandler struct {
-	authentication middleware.Authentication
 }
 
 // runtime represents broker runtime dependency
 type runtime struct {
 	version string
 	state   server.State
-	config  config.Broker
+	config  *config.Broker
 	node    models.Node
 	// init value when runtime
 	repo          state.Repository
 	repoFactory   state.RepositoryFactory
 	srv           srv
 	factory       factory
-	httpServer    *http.Server
+	httpServer    *HTTPServer
 	master        coordinator.Master
 	registry      discovery.Registry
 	stateMachines *coordinator.BrokerStateMachines
 
 	grpcServer rpc.GRPCServer
 	rpcHandler *rpcHandler
-
-	middleware *middlewareHandler
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -134,7 +104,7 @@ type runtime struct {
 }
 
 // NewBrokerRuntime creates broker runtime
-func NewBrokerRuntime(version string, config config.Broker) server.Service {
+func NewBrokerRuntime(version string, config *config.Broker) server.Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &runtime{
 		version:     version,
@@ -174,6 +144,7 @@ func (r *runtime) Run() error {
 
 	// start state repository
 	if err := r.startStateRepo(); err != nil {
+		r.log.Error("failed to startStateRepo", logger.Error(err))
 		r.state = server.Failed
 		return err
 	}
@@ -188,6 +159,7 @@ func (r *runtime) Run() error {
 
 	smFactory := coordinator.NewStateMachineFactory(&coordinator.StateMachineCfg{
 		Ctx:               r.ctx,
+		Repo:              r.repo,
 		CurrentNode:       r.node,
 		ChannelManager:    r.srv.channelManager,
 		ShardAssignSRV:    r.srv.shardAssignService,
@@ -216,8 +188,6 @@ func (r *runtime) Run() error {
 	}
 	r.master = coordinator.NewMaster(masterCfg)
 
-	r.buildMiddlewareDependency()
-	r.buildAPIDependency()
 	// start tcp server
 	r.startGRPCServer()
 
@@ -245,74 +215,84 @@ func (r *runtime) State() server.State {
 }
 
 // Stop stops broker server,
-func (r *runtime) Stop() error {
-	r.log.Info("stopping broker server.....")
+func (r *runtime) Stop() {
+	r.log.Info("stopping broker server...")
 	defer r.cancel()
 
 	if r.pusher != nil {
 		r.pusher.Stop()
+		r.log.Info("stopped prometheus pusher successfully")
 	}
 
 	if r.httpServer != nil {
-		r.log.Info("starting shutdown http server")
-		if err := r.httpServer.Shutdown(r.ctx); err != nil {
+		r.log.Info("stopping http server...")
+		if err := r.httpServer.Close(r.ctx); err != nil {
 			r.log.Error("shutdown http server error", logger.Error(err))
+		} else {
+			r.log.Info("stopped http server successfully")
 		}
 	}
 
 	// close registry, deregister broker node from active list
 	if r.registry != nil {
+		r.log.Info("closing discovery-registry...")
 		if err := r.registry.Close(); err != nil {
 			r.log.Error("unregister broker node error", logger.Error(err))
+		} else {
+			r.log.Info("closed discovery-registry successfully")
 		}
 	}
 
 	if r.master != nil {
+		r.log.Info("stopping master...")
 		r.master.Stop()
 	}
 
 	if r.stateMachines != nil {
+		r.log.Info("stopping broker-state-machines...")
 		r.stateMachines.Stop()
 	}
 
 	if r.repo != nil {
-		r.log.Info("closing state repo")
+		r.log.Info("closing state repo...")
 		if err := r.repo.Close(); err != nil {
 			r.log.Error("close state repo error, when broker stop", logger.Error(err))
+		} else {
+			r.log.Info("closed state repo successfully")
 		}
 	}
 
 	// finally shutdown rpc server
 	if r.grpcServer != nil {
-		r.log.Info("stopping grpc server")
+		r.log.Info("stopping grpc server...")
 		r.grpcServer.Stop()
+		r.log.Info("stoped grpc server successfully")
 	}
 
-	r.log.Info("broker server stop complete")
+	r.log.Info("stopped broker server successfully")
 	r.state = server.Terminated
-	return nil
 }
 
 // startHTTPServer starts http server for api rpcHandler
 func (r *runtime) startHTTPServer() {
-	port := r.config.BrokerBase.HTTP.Port
-
-	r.log.Info("starting http server", logger.Uint16("port", port))
-	router := api.NewRouter()
-
-	// add prometheus metric report
-	reporter := promreporter.NewReporter(promreporter.Options{})
-	router.Handle("/metrics", reporter.HTTPHandler())
-
-	r.httpServer = &http.Server{
-		Addr:         fmt.Sprintf(":%d", port),
-		WriteTimeout: time.Second * 15,
-		ReadTimeout:  time.Second * 15,
-		IdleTimeout:  time.Second * 60,
-		Handler:      router,
-	}
+	r.log.Info("starting HTTP server")
+	r.httpServer = NewHTTPServer(r.config.BrokerBase.HTTP)
+	// TODO set ctx
+	// TODO login api is not registered
+	httpAPI := api.NewAPI(context.TODO(), &deps.HTTPDeps{
+		Master:            r.master,
+		Repo:              r.repo,
+		StateMachines:     r.stateMachines,
+		DatabaseSrv:       r.srv.databaseService,
+		ShardAssignSrv:    r.srv.shardAssignService,
+		StorageClusterSrv: r.srv.storageClusterService,
+		CM:                r.srv.channelManager,
+		ExecutorFct:       query.NewExecutorFactory(),
+		JobManager:        r.srv.jobManager,
+	})
+	httpAPI.RegisterRouter(r.httpServer.GetAPIRouter())
 	go func() {
-		if err := r.httpServer.ListenAndServe(); err != http.ErrServerClosed {
+		if err := r.httpServer.Run(); err != http.ErrServerClosed {
 			panic(fmt.Sprintf("start http server with error: %s", err))
 		}
 		r.log.Info("http server stopped successfully")
@@ -337,7 +317,8 @@ func (r *runtime) buildServiceDependency() {
 	replicatorStateReport := replication.NewReplicatorStateReport(r.node, r.repo)
 
 	// hard code create channel first.
-	cm := replication.NewChannelManager(r.config.BrokerBase.ReplicationChannel, rpc.NewClientStreamFactory(r.node), replicatorStateReport)
+	cm := replication.NewChannelManager(r.config.BrokerBase.ReplicationChannel,
+		rpc.NewClientStreamFactory(r.node), replicatorStateReport)
 	taskManager := parallel.NewTaskManager(r.node, r.factory.taskClient, r.factory.taskServer)
 	jobManager := parallel.NewJobManager(taskManager)
 
@@ -346,10 +327,10 @@ func (r *runtime) buildServiceDependency() {
 	r.factory.taskClient.SetTaskReceiver(taskReceiver)
 
 	srv := srv{
-		storageClusterService: service.NewStorageClusterService(r.repo),
-		databaseService:       service.NewDatabaseService(r.repo),
-		storageStateService:   service.NewStorageStateService(r.repo),
-		shardAssignService:    service.NewShardAssignService(r.repo),
+		storageClusterService: service.NewStorageClusterService(r.ctx, r.repo),
+		databaseService:       service.NewDatabaseService(r.ctx, r.repo),
+		storageStateService:   service.NewStorageStateService(r.ctx, r.repo),
+		shardAssignService:    service.NewShardAssignService(r.ctx, r.repo),
 		replicatorStateReport: replicatorStateReport,
 		channelManager:        cm,
 		taskManager:           taskManager,
@@ -358,68 +339,9 @@ func (r *runtime) buildServiceDependency() {
 	r.srv = srv
 }
 
-// buildAPIDependency builds broker api dependency
-func (r *runtime) buildAPIDependency() {
-	handlers := apiHandler{
-		storageClusterAPI:  admin.NewStorageClusterAPI(r.srv.storageClusterService),
-		databaseAPI:        admin.NewDatabaseAPI(r.srv.databaseService),
-		databaseFlusherAPI: admin.NewDatabaseFlusherAPI(r.master),
-		loginAPI:           api.NewLoginAPI(r.config.BrokerBase.User, r.middleware.authentication),
-		storageStateAPI:    stateAPI.NewStorageAPI(r.ctx, r.repo, r.stateMachines.StorageSM, r.srv.shardAssignService, r.srv.databaseService),
-		brokerStateAPI:     stateAPI.NewBrokerAPI(r.ctx, r.repo, r.stateMachines.NodeSM),
-		masterAPI:          masterAPI.NewMasterAPI(r.master),
-		metricAPI: queryAPI.NewMetricAPI(r.stateMachines.ReplicaStatusSM,
-			r.stateMachines.NodeSM, r.stateMachines.DatabaseSM, query.NewExecutorFactory(), r.srv.jobManager),
-		metadataAPI: queryAPI.NewMetadataAPI(r.srv.databaseService, r.stateMachines.ReplicaStatusSM,
-			r.stateMachines.NodeSM, query.NewExecutorFactory(), r.srv.jobManager),
-		writeAPI:         writeAPI.NewWriteAPI(r.srv.channelManager),
-		prometheusWriter: write.NewPrometheusWrite(r.srv.channelManager),
-	}
-
-	api.AddRoute("Login", http.MethodPost, "/login", handlers.loginAPI.Login)
-	api.AddRoute("Check", http.MethodGet, "/check/1", handlers.loginAPI.Check)
-
-	api.AddRoute("SaveStorageCluster", http.MethodPost, "/storage/cluster", handlers.storageClusterAPI.Create)
-	api.AddRoute("GetStorageCluster", http.MethodGet, "/storage/cluster", handlers.storageClusterAPI.GetByName)
-	api.AddRoute("DeleteStorageCluster", http.MethodDelete, "/storage/cluster", handlers.storageClusterAPI.DeleteByName)
-	api.AddRoute("ListStorageClusters", http.MethodGet, "/storage/cluster/list", handlers.storageClusterAPI.List)
-
-	api.AddRoute("CreateOrUpdateDatabase", http.MethodPost, "/database", handlers.databaseAPI.Save)
-	api.AddRoute("GetDatabase", http.MethodGet, "/database", handlers.databaseAPI.GetByName)
-	api.AddRoute("ListDatabase", http.MethodGet, "/database/list", handlers.databaseAPI.List)
-	api.AddRoute("FLushDatabase", http.MethodGet, "/database/flush", handlers.databaseFlusherAPI.SubmitFlushTask)
-
-	api.AddRoute("ListStorageClusterNodesState", http.MethodGet, "/storage/cluster/state", handlers.storageStateAPI.GetStorageClusterState)
-	api.AddRoute("ListStorageClusterState", http.MethodGet, "/storage/cluster/state/list", handlers.storageStateAPI.ListStorageClusterState)
-	api.AddRoute("ListBrokerClusterState", http.MethodGet, "/broker/cluster/state", handlers.brokerStateAPI.ListBrokersStat)
-
-	api.AddRoute("GetMasterState", http.MethodGet, "/cluster/master", handlers.masterAPI.GetMaster)
-
-	api.AddRoute("QueryMetric", http.MethodGet, "/query/metric", handlers.metricAPI.Search)
-	api.AddRoute("QueryMetadata", http.MethodGet, "/query/metadata", handlers.metadataAPI.Handle)
-
-	api.AddRoute("WriteSumMetric", http.MethodPut, "/metric/sum", handlers.writeAPI.Sum)
-	api.AddRoute("PrometheusWriter", http.MethodPut, "/metric/prometheus", handlers.prometheusWriter.Write)
-}
-
-// buildMiddlewareDependency builds middleware dependency
-// pattern support regexp matching
-func (r *runtime) buildMiddlewareDependency() {
-	r.middleware = &middlewareHandler{
-		authentication: middleware.NewAuthentication(r.config.BrokerBase.User),
-	}
-	httpAPI, err := regexp.Compile("/*")
-	if err == nil {
-		api.AddMiddleware(middleware.AccessLogMiddleware, httpAPI)
-	}
-	validate, err := regexp.Compile("/check/*")
-	if err == nil {
-		api.AddMiddleware(r.middleware.authentication.Validate, validate)
-	}
-}
-
 // startGRPCServer starts the GRPC server
 func (r *runtime) startGRPCServer() {
+	r.log.Info("starting GRPC server")
 	r.grpcServer = rpc.NewGRPCServer(fmt.Sprintf(":%d", r.config.BrokerBase.GRPC.Port))
 
 	// bind grpc handlers
@@ -444,38 +366,32 @@ func (r *runtime) bindGRPCHandlers() {
 }
 
 func (r *runtime) monitoring() {
-	systemStatMonitorEnabled := r.config.Monitor.SystemReportInterval > 0
+	monitorEnabled := r.config.Monitor.ReportInterval > 0
 	node := models.ActiveNode{
 		Version:    r.version,
 		Node:       r.node,
 		OnlineTime: timeutil.Now(),
 	}
-	if systemStatMonitorEnabled {
-		r.log.Info("SystemStatMonitor is running")
-		go monitoring.NewSystemCollector(
-			r.ctx,
-			r.config.Monitor.SystemReportInterval.Duration(),
-			r.config.BrokerBase.ReplicationChannel.Dir,
-			r.repo,
-			constants.GetNodeMonitoringStatPath(r.node.Indicator()),
-			node).Run()
+	if !monitorEnabled {
+		r.log.Info("monitor report-interval sets to 0, exit")
+		return
 	}
+	r.log.Info("monitor is running",
+		logger.String("interval", r.config.Monitor.ReportInterval.String()))
 
-	runtimeStatMonitorEnabled := r.config.Monitor.RuntimeReportInterval > 0
-	if runtimeStatMonitorEnabled {
-		r.log.Info("RuntimeStatMonitor is running")
-		go monitoring.NewRunTimeCollector(
-			r.ctx,
-			r.config.Monitor.RuntimeReportInterval.Duration(),
-			map[string]string{"role": "broker", "version": r.version},
-		)
-	}
+	go monitoring.NewSystemCollector(
+		r.ctx,
+		r.config.Monitor.ReportInterval.Duration(),
+		r.config.BrokerBase.ReplicationChannel.Dir,
+		r.repo,
+		constants.GetNodeMonitoringStatPath(r.node.Indicator()),
+		node).Run()
 
 	r.pusher = monitoring.NewPrometheusPusher(
 		r.ctx,
 		r.config.Monitor.URL,
-		r.config.Monitor.RuntimeReportInterval.Duration(),
-		prometheus.Gatherers{monitoring.BrokerGatherer, prometheus.DefaultGatherer},
+		r.config.Monitor.ReportInterval.Duration(),
+		prometheus.Gatherers{monitoring.BrokerGatherer},
 		[]*dto.LabelPair{
 			{
 				Name:  proto.String("namespace"),

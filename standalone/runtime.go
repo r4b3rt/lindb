@@ -29,6 +29,7 @@ import (
 	"github.com/lindb/lindb/broker"
 	"github.com/lindb/lindb/config"
 	"github.com/lindb/lindb/constants"
+	"github.com/lindb/lindb/internal/bootstrap"
 	"github.com/lindb/lindb/models"
 	"github.com/lindb/lindb/pkg/logger"
 	"github.com/lindb/lindb/pkg/option"
@@ -46,20 +47,20 @@ type runtime struct {
 	version     string
 	state       server.State
 	repoFactory state.RepositoryFactory
-	cfg         config.Standalone
+	cfg         *config.Standalone
 	etcd        *embed.Etcd
 	broker      server.Service
 	storage     server.Service
 
-	initialize *initialize
-	delayInit  time.Duration
+	initializer *bootstrap.ClusterInitializer
+	delayInit   time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 // NewStandaloneRuntime creates the runtime
-func NewStandaloneRuntime(version string, cfg config.Standalone) server.Service {
+func NewStandaloneRuntime(version string, cfg *config.Standalone) server.Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &runtime{
 		version:     version,
@@ -67,19 +68,19 @@ func NewStandaloneRuntime(version string, cfg config.Standalone) server.Service 
 		delayInit:   5 * time.Second,
 		repoFactory: state.NewRepositoryFactory("standalone"),
 		broker: broker.NewBrokerRuntime(version,
-			config.Broker{
+			&config.Broker{
 				BrokerBase: cfg.BrokerBase,
 				Monitor:    cfg.Monitor,
 			}),
 		storage: storage.NewStorageRuntime(version,
-			config.Storage{
+			&config.Storage{
 				StorageBase: cfg.StorageBase,
 				Monitor:     cfg.Monitor,
 			}),
-		cfg:        cfg,
-		initialize: newInitialize(fmt.Sprintf("http://localhost:%d", cfg.BrokerBase.HTTP.Port)),
-		ctx:        ctx,
-		cancel:     cancel,
+		cfg:         cfg,
+		initializer: bootstrap.NewClusterInitializer(fmt.Sprintf("http://localhost:%d", cfg.BrokerBase.HTTP.Port)),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -93,6 +94,7 @@ func (r *runtime) Run() error {
 	config.StandaloneMode = true
 
 	if err := r.startETCD(); err != nil {
+		log.Error("failed to start ETCD", logger.Error(err))
 		r.state = server.Failed
 		return err
 	}
@@ -107,16 +109,16 @@ func (r *runtime) Run() error {
 	r.state = server.Running
 
 	time.AfterFunc(r.delayInit, func() {
-		log.Info("start initialize standalone internal database")
-		r.initialize.initStorageCluster(config.StorageCluster{
-			Name: "standalone",
-			Config: config.RepoState{
-				Namespace: r.cfg.StorageBase.Coordinator.Namespace,
-				Endpoints: r.cfg.StorageBase.Coordinator.Endpoints,
-			},
-		})
+		log.Info("initializing standalone internal database")
+		if err := r.initializer.InitStorageCluster(config.StorageCluster{
+			Name:   "standalone",
+			Config: r.cfg.StorageBase.Coordinator}); err != nil {
+			log.Error("initialized standalone storage cluster with error", logger.Error(err))
+		} else {
+			log.Info("initialized standalone storage cluster successfully")
+		}
 
-		r.initialize.initInternalDatabase(models.Database{
+		if err := r.initializer.InitInternalDatabase(models.Database{
 			Name:          "_internal",
 			Cluster:       storageClusterName,
 			NumOfShard:    1,
@@ -124,7 +126,11 @@ func (r *runtime) Run() error {
 			Option: option.DatabaseOption{
 				Interval: "10s",
 			},
-		})
+		}); err != nil {
+			log.Error("init _internal database with error", logger.Error(err))
+		} else {
+			log.Info("initialized _internal database successfully")
+		}
 	})
 
 	return nil
@@ -150,26 +156,19 @@ func (r *runtime) State() server.State {
 }
 
 // Stop stops the cluster
-func (r *runtime) Stop() error {
+func (r *runtime) Stop() {
 	defer r.cancel()
 	if r.broker != nil {
-		if err := r.broker.Stop(); err != nil {
-			log.Error("stop broker server", logger.Error(err))
-		}
-		log.Info("broker server stopped")
+		r.broker.Stop()
 	}
 	if r.storage != nil {
-		if err := r.storage.Stop(); err != nil {
-			log.Error("stop storage server", logger.Error(err))
-		}
-		log.Info("storage server stopped")
+		r.storage.Stop()
 	}
 	if r.etcd != nil {
 		r.etcd.Close()
-		log.Info("etcd server stopped")
+		log.Info("stopped etcd server")
 	}
 	r.state = server.Terminated
-	return nil
 }
 
 // startETCD starts embed etcd server

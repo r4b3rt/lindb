@@ -30,6 +30,7 @@ import (
 
 const (
 	storageCfgName        = "storage.toml"
+	storageLogFileName    = "lind-storage.log"
 	defaultStorageCfgFile = "./" + storageCfgName
 )
 
@@ -53,7 +54,6 @@ func newStorageCmd() *cobra.Command {
 	storageCmd.AddCommand(
 		runStorageCmd,
 		initializeStorageConfigCmd,
-		databaseCmd,
 	)
 	return storageCmd
 }
@@ -80,23 +80,14 @@ func serveStorage(cmd *cobra.Command, args []string) error {
 	if err := ltoml.LoadConfig(cfg, defaultStorageCfgFile, &storageCfg); err != nil {
 		return fmt.Errorf("decode config file error: %s", err)
 	}
-	if err := logger.InitLogger(storageCfg.Logging); err != nil {
+	if err := logger.InitLogger(storageCfg.Logging, storageLogFileName); err != nil {
 		return fmt.Errorf("init logger error: %s", err)
 	}
 
 	// start storage server
-	storageRuntime := storage.NewStorageRuntime(getVersion(), storageCfg)
+	storageRuntime := storage.NewStorageRuntime(getVersion(), &storageCfg)
 	if err := run(ctx, storageRuntime); err != nil {
 		return err
 	}
 	return nil
-}
-
-// databaseCmd provides the ability to control the database of storage
-var databaseCmd = &cobra.Command{
-	Use:   "database",
-	Short: "Control the database of LinDB",
-	Run: func(cmd *cobra.Command, args []string) {
-		// todo: @codingcrush
-	},
 }

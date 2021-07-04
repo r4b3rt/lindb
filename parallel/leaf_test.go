@@ -29,9 +29,7 @@ import (
 	"github.com/lindb/lindb/constants"
 	"github.com/lindb/lindb/models"
 	"github.com/lindb/lindb/pkg/encoding"
-	"github.com/lindb/lindb/pkg/option"
 	"github.com/lindb/lindb/rpc"
-	commonmock "github.com/lindb/lindb/rpc/pbmock/common"
 	pb "github.com/lindb/lindb/rpc/proto/common"
 	"github.com/lindb/lindb/service"
 	"github.com/lindb/lindb/sql/stmt"
@@ -45,7 +43,7 @@ func TestLeafTask_Process_Fail(t *testing.T) {
 	taskServerFactory := rpc.NewMockTaskServerFactory(ctrl)
 	storageService := service.NewMockStorageService(ctrl)
 	executorFactory := NewMockExecutorFactory(ctrl)
-	serverStream := commonmock.NewMockTaskService_HandleServer(ctrl)
+	serverStream := pb.NewMockTaskService_HandleServer(ctrl)
 	mockDatabase := tsdb.NewMockDatabase(ctrl)
 
 	currentNode := models.Node{IP: "1.1.1.3", Port: 8000}
@@ -86,7 +84,6 @@ func TestLeafTask_Process_Fail(t *testing.T) {
 	assert.Equal(t, errUnmarshalQuery, err)
 
 	// test executor fail
-	mockDatabase.EXPECT().GetOption().Return(option.DatabaseOption{Interval: "10s"})
 	mockDatabase.EXPECT().ExecutorPool().Return(&tsdb.ExecutorPool{})
 	taskServerFactory.EXPECT().GetStream(gomock.Any()).Return(serverStream)
 	storageService.EXPECT().GetDatabase(gomock.Any()).Return(mockDatabase, true).AnyTimes()
@@ -116,11 +113,10 @@ func TestLeafProcessor_Process(t *testing.T) {
 	query := stmt.Query{MetricName: "cpu"}
 	data := encoding.JSONMarshal(&query)
 
-	mockDatabase.EXPECT().GetOption().Return(option.DatabaseOption{Interval: "10s"})
 	mockDatabase.EXPECT().ExecutorPool().Return(&tsdb.ExecutorPool{})
 	storageService.EXPECT().GetDatabase(gomock.Any()).Return(mockDatabase, true)
 
-	serverStream := commonmock.NewMockTaskService_HandleServer(ctrl)
+	serverStream := pb.NewMockTaskService_HandleServer(ctrl)
 	taskServerFactory.EXPECT().GetStream(gomock.Any()).Return(serverStream)
 	exec := NewMockExecutor(ctrl)
 	exec.EXPECT().Execute()
@@ -148,7 +144,7 @@ func TestLeafTask_Suggest_Process(t *testing.T) {
 		Leafs:    []models.Leaf{{BaseNode: models.BaseNode{Indicator: "1.1.1.3:8000"}}},
 	})
 	storageService.EXPECT().GetDatabase(gomock.Any()).Return(mockDatabase, true).AnyTimes()
-	serverStream := commonmock.NewMockTaskService_HandleServer(ctrl)
+	serverStream := pb.NewMockTaskService_HandleServer(ctrl)
 	taskServerFactory.EXPECT().GetStream(gomock.Any()).Return(serverStream).AnyTimes()
 
 	// test unmarshal err

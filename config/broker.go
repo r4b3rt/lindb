@@ -42,8 +42,8 @@ func (h *HTTP) TOML() string {
 
 // User represents user model
 type User struct {
-	UserName string `toml:"username" json:"username"`
-	Password string `toml:"password" json:"password"`
+	UserName string `toml:"username" json:"username" binding:"required"`
+	Password string `toml:"password" json:"password" binding:"required"`
 }
 
 func (u *User) TOML() string {
@@ -95,7 +95,7 @@ func (rc *ReplicationChannel) TOML() string {
     ## WAL mmaped log directory
     dir = "%s"
     
-    ##  data-size-limit is the maximum size in megabytes of the page file before a new
+    ## data-size-limit is the maximum size in megabytes of the page file before a new
     ## file is created. It defaults to 512 megabytes, available size is in [1MB, 1GB]
     data-size-limit = %d
 	
@@ -167,6 +167,7 @@ func NewDefaultBrokerBase() *BrokerBase {
 		Coordinator: RepoState{
 			Namespace:   "/lindb/broker",
 			Endpoints:   []string{"http://localhost:2379"},
+			Timeout:     ltoml.Duration(time.Second * 10),
 			DialTimeout: ltoml.Duration(time.Second * 5),
 		},
 		User: User{

@@ -20,11 +20,11 @@ package parallel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/lindb/lindb/constants"
 	"github.com/lindb/lindb/models"
 	"github.com/lindb/lindb/pkg/encoding"
-	"github.com/lindb/lindb/pkg/timeutil"
 	"github.com/lindb/lindb/rpc"
 	pb "github.com/lindb/lindb/rpc/proto/common"
 	"github.com/lindb/lindb/service"
@@ -108,7 +108,7 @@ func (p *leafTask) processMetadataSuggest(db tsdb.Database, shardIDs []int32,
 	}
 	exec := p.executorFactory.NewMetadataStorageExecutor(db, shardIDs, query)
 	result, err := exec.Execute()
-	if err != nil && err != constants.ErrNotFound {
+	if err != nil && !errors.Is(err, constants.ErrNotFound) {
 		return err
 	}
 	// send result to upstream
@@ -132,14 +132,9 @@ func (p *leafTask) processDataSearch(ctx context.Context, db tsdb.Database, shar
 		return errUnmarshalQuery
 	}
 
-	option := db.GetOption()
-	var interval timeutil.Interval
-	_ = interval.ValueOf(option.Interval)
-	//TODO need get storage interval by query time if has rollup config
-	timeRange, intervalRatio, queryInterval := downSamplingTimeRange(query.Interval, interval, query.TimeRange)
 	// execute leaf task
 	storageExecuteCtx := p.executorFactory.NewStorageExecuteContext(shardIDs, &query)
-	queryFlow := NewStorageQueryFlow(ctx, storageExecuteCtx, &query, req, stream, db.ExecutorPool(), timeRange, queryInterval, intervalRatio)
+	queryFlow := NewStorageQueryFlow(ctx, storageExecuteCtx, &query, req, stream, db.ExecutorPool())
 	exec := p.executorFactory.NewStorageExecutor(queryFlow, db, storageExecuteCtx)
 	exec.Execute()
 	return nil

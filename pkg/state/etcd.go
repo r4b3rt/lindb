@@ -21,12 +21,16 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/lindb/lindb/config"
 	"github.com/lindb/lindb/pkg/logger"
 
 	etcdcliv3 "go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/clientv3/concurrency"
+	"google.golang.org/grpc"
 )
 
 // etcdRepository is repository based on etcd storage
@@ -34,21 +38,29 @@ type etcdRepository struct {
 	namespace string
 	client    *etcdcliv3.Client
 	logger    *logger.Logger
+	timeout   time.Duration
 }
 
-// newEtedRepository creates a new repository based on etcd storage
-func newEtedRepository(repoState config.RepoState, owner string) (Repository, error) {
+// newEtcdRepository creates a new repository based on etcd storage
+func newEtcdRepository(repoState config.RepoState, owner string) (Repository, error) {
 	cfg := etcdcliv3.Config{
-		Endpoints: repoState.Endpoints,
-		// DialTimeout: config.DialTimeout * time.Second,
+		Endpoints:            repoState.Endpoints,
+		DialTimeout:          repoState.DialTimeout.Duration(),
+		DialKeepAliveTime:    repoState.DialTimeout.Duration(),
+		DialKeepAliveTimeout: repoState.DialTimeout.Duration(),
+		DialOptions:          []grpc.DialOption{grpc.WithBlock()},
+		Username:             repoState.Username,
+		Password:             repoState.Password,
 	}
 	cli, err := etcdcliv3.New(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("create etc client error:%s", err)
+		return nil, fmt.Errorf("create etcd client error:%s", err)
 	}
+
 	repo := etcdRepository{
 		namespace: repoState.Namespace,
 		client:    cli,
+		timeout:   repoState.Timeout.Duration(),
 		logger:    logger.GetLogger(owner, "ETCD")}
 
 	repo.logger.Info("new etcd client successfully",
@@ -58,7 +70,9 @@ func newEtedRepository(repoState config.RepoState, owner string) (Repository, er
 
 // Get retrieves value for given key from etcd
 func (r *etcdRepository) Get(ctx context.Context, key string) ([]byte, error) {
-	resp, err := r.get(ctx, key)
+	thisCtx, cancelFunc := context.WithTimeout(ctx, r.timeout)
+	defer cancelFunc()
+	resp, err := r.get(thisCtx, key)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +81,9 @@ func (r *etcdRepository) Get(ctx context.Context, key string) ([]byte, error) {
 
 // List retrieves list for given prefix from etcd
 func (r *etcdRepository) List(ctx context.Context, prefix string) ([]KeyValue, error) {
-	resp, err := r.client.Get(ctx, r.keyPath(prefix), etcdcliv3.WithPrefix())
+	thisCtx, cancelFunc := context.WithTimeout(ctx, r.timeout)
+	defer cancelFunc()
+	resp, err := r.client.Get(thisCtx, r.keyPath(prefix), etcdcliv3.WithPrefix())
 	if err != nil {
 		return nil, err
 	}
@@ -85,13 +101,17 @@ func (r *etcdRepository) List(ctx context.Context, prefix string) ([]KeyValue, e
 
 // Put puts a key-value pair into etcd
 func (r *etcdRepository) Put(ctx context.Context, key string, val []byte) error {
-	_, err := r.client.Put(ctx, r.keyPath(key), string(val))
+	thisCtx, cancelFunc := context.WithTimeout(ctx, r.timeout)
+	defer cancelFunc()
+	_, err := r.client.Put(thisCtx, r.keyPath(key), string(val))
 	return err
 }
 
 // Delete deletes value for given key from etcd
 func (r *etcdRepository) Delete(ctx context.Context, key string) error {
-	_, err := r.client.Delete(ctx, r.keyPath(key))
+	thisCtx, cancelFunc := context.WithTimeout(ctx, r.timeout)
+	defer cancelFunc()
+	_, err := r.client.Delete(thisCtx, r.keyPath(key))
 	return err
 }
 
@@ -121,8 +141,10 @@ func (r *etcdRepository) Heartbeat(ctx context.Context, key string, value []byte
 // Elect puts a key with a value.it will be success
 // if the key does not exist,otherwise it will be failed.When this
 // operation success,it will do keepalive background
-func (r *etcdRepository) Elect(ctx context.Context, key string,
-	value []byte, ttl int64) (bool, <-chan Closed, error) {
+func (r *etcdRepository) Elect(
+	ctx context.Context, key string,
+	value []byte, ttl int64,
+) (bool, <-chan Closed, error) {
 	h := newHeartbeat(r.client, r.keyPath(key), value, ttl, true)
 	h.withLogger(r.logger)
 	success, err := h.grantKeepAliveLease(ctx)
@@ -147,7 +169,9 @@ func (r *etcdRepository) Elect(ctx context.Context, key string,
 
 // get returns response of get operator
 func (r *etcdRepository) get(ctx context.Context, key string) (*etcdcliv3.GetResponse, error) {
-	resp, err := r.client.Get(ctx, r.keyPath(key))
+	thisCtx, cancelFunc := context.WithTimeout(ctx, r.timeout)
+	defer cancelFunc()
+	resp, err := r.client.Get(thisCtx, r.keyPath(key))
 	if err != nil {
 		return nil, fmt.Errorf("get value failure for key[%s], error:%s", key, err)
 	}
@@ -216,6 +240,44 @@ func (r *etcdRepository) Commit(ctx context.Context, txn Transaction) error {
 	}
 	resp, err := r.client.Txn(ctx).If(t.cmps...).Then(t.ops...).Commit()
 	return TxnErr(resp, err)
+}
+
+// NextSequence returns next sequence number.
+func (r *etcdRepository) NextSequence(ctx context.Context, key string) (int64, error) {
+	s, err := concurrency.NewSession(r.client) // explore options to pass
+	if err != nil {
+		return 0, err
+	}
+
+	m := concurrency.NewMutex(s, key)
+
+	if err := m.Lock(ctx); err != nil {
+		return 0, err
+	}
+	defer func() {
+		_ = m.Unlock(ctx)
+	}()
+
+	resp, err := r.client.Get(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	var seq int64
+	if resp.Count > 0 {
+		seq, err = strconv.ParseInt(string(resp.OpResponse().Get().Kvs[0].Value), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		seq++
+	} else {
+		seq = 1 // init value
+	}
+
+	_, err = r.client.Put(ctx, key, strconv.FormatInt(seq, 10))
+	if err != nil {
+		return 0, err
+	}
+	return seq, nil
 }
 
 // keyPath return new key path with namespace prefix

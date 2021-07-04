@@ -48,8 +48,7 @@ func TestBrokerRuntime(t *testing.T) {
 
 var cfg = config.Broker{
 	Monitor: config.Monitor{
-		RuntimeReportInterval: ltoml.Duration(10 * time.Second),
-		SystemReportInterval:  ltoml.Duration(10 * time.Second),
+		ReportInterval: ltoml.Duration(10 * time.Second),
 	},
 	BrokerBase: config.BrokerBase{
 		HTTP: config.HTTP{
@@ -75,8 +74,9 @@ var cfg = config.Broker{
 
 func (ts *testBrokerRuntimeSuite) TestBrokerRun(c *check.C) {
 	cfg.BrokerBase.Coordinator.Endpoints = ts.Cluster.Endpoints
+	cfg.BrokerBase.Coordinator.Timeout = ltoml.Duration(time.Second * 10)
 
-	broker := NewBrokerRuntime("test-version", cfg)
+	broker := NewBrokerRuntime("test-version", &cfg)
 	err := broker.Run()
 	if err != nil {
 		c.Fatal(err)
@@ -87,7 +87,7 @@ func (ts *testBrokerRuntimeSuite) TestBrokerRun(c *check.C) {
 	c.Assert(server.Running, check.Equals, broker.State())
 	c.Assert("broker", check.Equals, broker.Name())
 
-	_ = broker.Stop()
+	broker.Stop()
 	c.Assert(server.Terminated, check.Equals, broker.State())
 }
 
@@ -96,7 +96,7 @@ func (ts *testBrokerRuntimeSuite) TestBrokerRun_GetHost_Err(c *check.C) {
 		getHostIP = hostutil.GetHostIP
 		hostName = os.Hostname
 	}()
-	broker := NewBrokerRuntime("test-version", cfg)
+	broker := NewBrokerRuntime("test-version", &cfg)
 	getHostIP = func() (string, error) {
 		return "ip1", fmt.Errorf("err")
 	}
@@ -125,14 +125,14 @@ func (ts *testBrokerRuntimeSuite) TestBroker_Run_Err(c *check.C) {
 		}
 	}()
 
-	broker := NewBrokerRuntime("test-version", cfg)
+	broker := NewBrokerRuntime("test-version", &cfg)
 	b := broker.(*runtime)
 	repoFactory := state.NewMockRepositoryFactory(ctrl)
 	b.repoFactory = repoFactory
 	repoFactory.EXPECT().CreateRepo(gomock.Any()).Return(nil, fmt.Errorf("err"))
 	err := broker.Run()
 	assert.Error(ts.t, err)
-	_ = broker.Stop()
+	broker.Stop()
 
 	repo := state.NewMockRepository(ctrl)
 	repoFactory.EXPECT().CreateRepo(gomock.Any()).Return(repo, nil).AnyTimes()
@@ -144,5 +144,5 @@ func (ts *testBrokerRuntimeSuite) TestBroker_Run_Err(c *check.C) {
 	registry := discovery.NewMockRegistry(ctrl)
 	b.registry = registry
 	registry.EXPECT().Close().Return(fmt.Errorf("err"))
-	_ = broker.Stop()
+	broker.Stop()
 }

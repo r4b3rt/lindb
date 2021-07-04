@@ -25,7 +25,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/atomic"
 
-	"github.com/lindb/lindb/constants"
 	"github.com/lindb/lindb/flow"
 	"github.com/lindb/lindb/monitoring"
 	"github.com/lindb/lindb/pkg/logger"
@@ -92,9 +91,10 @@ type MemoryDatabase interface {
 
 // MemoryDatabaseCfg represents the memory database config
 type MemoryDatabaseCfg struct {
-	Name     string
-	Metadata metadb.Metadata
-	TempPath string
+	FamilyTime int64
+	Name       string
+	Metadata   metadb.Metadata
+	TempPath   string
 }
 
 // flushContext holds the context for flushing
@@ -106,8 +106,9 @@ type flushContext struct {
 
 // memoryDatabase implements MemoryDatabase.
 type memoryDatabase struct {
-	name     string
-	metadata metadb.Metadata // metadata for assign metric id/field id
+	familyTime int64
+	name       string
+	metadata   metadb.Metadata // metadata for assign metric id/field id
 
 	mStores *MetricBucketStore // metric id => mStoreINTF
 	buf     DataPointBuffer
@@ -129,6 +130,7 @@ func NewMemoryDatabase(cfg MemoryDatabaseCfg) (MemoryDatabase, error) {
 		return nil, err
 	}
 	return &memoryDatabase{
+		familyTime:                 cfg.FamilyTime,
 		name:                       cfg.Name,
 		metadata:                   cfg.Metadata,
 		buf:                        buf,
@@ -228,8 +230,8 @@ func (md *memoryDatabase) FlushFamilyTo(flusher metricsdata.Flusher) error {
 	return flusher.Commit()
 }
 
-// Filter filters the data based on metric/version/seriesIDs,
-// if finds data then returns the FilterResultSet, else returns nil
+// Filter filters the data based on metric/seriesIDs,
+// if finds data then returns the flow.FilterResultSet, else returns nil
 func (md *memoryDatabase) Filter(metricID uint32,
 	seriesIDs *roaring.Bitmap, timeRange timeutil.TimeRange,
 	fields field.Metas,
@@ -237,15 +239,12 @@ func (md *memoryDatabase) Filter(metricID uint32,
 	md.rwMutex.RLock()
 	defer md.rwMutex.RUnlock()
 
-	// find if has match family id based on family time range
-	//FIXME(stone100) move to shard
-
 	mStore, ok := md.mStores.Get(metricID)
 	if !ok {
-		return nil, constants.ErrNotFound
+		return nil, nil
 	}
 	//TODO filter slot range
-	return mStore.Filter(seriesIDs, fields)
+	return mStore.Filter(md.familyTime, seriesIDs, fields)
 }
 
 // MemSize returns the time series database memory size

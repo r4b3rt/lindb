@@ -19,78 +19,52 @@ package write
 
 import (
 	"errors"
-	"fmt"
-	"io"
-	"io/ioutil"
 	"net/http"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 
+	"github.com/lindb/lindb/broker/deps"
 	"github.com/lindb/lindb/mock"
 	"github.com/lindb/lindb/replication"
 )
 
 func TestPrometheusWrite_Write(t *testing.T) {
 	ctrl := gomock.NewController(t)
-	defer func() {
-		readAllFunc = ioutil.ReadAll
-		ctrl.Finish()
-	}()
+	defer ctrl.Finish()
 
 	cm := replication.NewMockChannelManager(ctrl)
-	api := NewPrometheusWrite(cm)
+	api := NewPrometheusWriter(&deps.HTTPDeps{CM: cm})
+	r := gin.New()
+	api.Register(r)
 	// case 1: param error
-	mock.DoRequest(t, &mock.HTTPHandler{
-		Method:         http.MethodPut,
-		URL:            "/metric/prometheus",
-		HandlerFunc:    api.Write,
-		ExpectHTTPCode: 500,
-	})
+	resp := mock.DoRequest(t, r, http.MethodPut, PrometheusWritePath, "")
+	assert.Equal(t, http.StatusInternalServerError, resp.Code)
 	// case 2: read request body err
-	readAllFunc = func(r io.Reader) (bytes []byte, err error) {
-		return nil, fmt.Errorf("err")
-	}
-	mock.DoRequest(t, &mock.HTTPHandler{
-		Method:         http.MethodPut,
-		URL:            "/metric/prometheus?db=dal",
-		HandlerFunc:    api.Write,
-		ExpectHTTPCode: 500,
-	})
-	// case 3: write wal err
+	resp = mock.DoRequest(t, r, http.MethodPut, PrometheusWritePath+"?db=dal", "#$$#@#")
+	assert.Equal(t, http.StatusInternalServerError, resp.Code)
+	//	// case 3: write wal err
 	input := `# HELP go_gc_duration_seconds A summary of the GC invocation durations.
 # 	TYPE go_gc_duration_seconds summary
 go_gc_duration_seconds { quantile = "0.9999" } NaN
 go_gc_duration_seconds_count 9
 go_gc_duration_seconds_sum 90
-`
-	readAllFunc = func(r io.Reader) (bytes []byte, err error) {
-		return []byte(input), nil
-	}
+//`
 	cm.EXPECT().Write(gomock.Any(), gomock.Any()).Return(errors.New("err"))
-	mock.DoRequest(t, &mock.HTTPHandler{
-		Method:         http.MethodPut,
-		URL:            "/metric/prometheus?db=dal&cluster=dal&c=1",
-		HandlerFunc:    api.Write,
-		ExpectHTTPCode: 500,
-	})
+	resp = mock.DoRequest(t, r, http.MethodPut, PrometheusWritePath+"?db=dal", input)
+	assert.Equal(t, http.StatusInternalServerError, resp.Code)
 	// case 4: write wal success
 	cm.EXPECT().Write(gomock.Any(), gomock.Any()).Return(nil)
-	mock.DoRequest(t, &mock.HTTPHandler{
-		Method:         http.MethodPut,
-		URL:            "/metric/prometheus?db=dal&cluster=dal&c=1",
-		HandlerFunc:    api.Write,
-		ExpectHTTPCode: 200,
-	})
+	resp = mock.DoRequest(t, r, http.MethodPut, PrometheusWritePath+"?db=dal", input)
+	assert.Equal(t, http.StatusNoContent, resp.Code)
 	// case 5: parse prometheus data err
 	input = "# HELP go_gc_duration_seconds A summary of the GC invocation durations"
-	readAllFunc = func(r io.Reader) (bytes []byte, err error) {
-		return []byte(input), nil
-	}
-	mock.DoRequest(t, &mock.HTTPHandler{
-		Method:         http.MethodPut,
-		URL:            "/metric/prometheus?db=dal&cluster=dal&c=1",
-		HandlerFunc:    api.Write,
-		ExpectHTTPCode: 500,
-	})
+	resp = mock.DoRequest(t, r, http.MethodPut, PrometheusWritePath+"?db=dal", input)
+	assert.Equal(t, http.StatusInternalServerError, resp.Code)
+
+	// case 6: enrich_tag bad format
+	resp = mock.DoRequest(t, r, http.MethodPut, PrometheusWritePath+"?db=test&ns=ns2&enrich_tag=a", "")
+	assert.Equal(t, http.StatusInternalServerError, resp.Code)
 }

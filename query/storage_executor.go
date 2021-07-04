@@ -24,9 +24,12 @@ import (
 	"github.com/lindb/roaring"
 	"go.uber.org/atomic"
 
+	"github.com/lindb/lindb/aggregation"
 	"github.com/lindb/lindb/constants"
 	"github.com/lindb/lindb/flow"
 	"github.com/lindb/lindb/parallel"
+	"github.com/lindb/lindb/pkg/encoding"
+	"github.com/lindb/lindb/pkg/timeutil"
 	"github.com/lindb/lindb/series"
 	"github.com/lindb/lindb/series/field"
 	"github.com/lindb/lindb/series/tag"
@@ -50,16 +53,6 @@ var (
 	errShardNumNotMatch  = errors.New("got shard size not equals input shard size")
 )
 
-// filterResultSet represents data filter result set
-type filterResultSet struct {
-	rs []flow.FilterResultSet
-}
-
-// isEmpty returns if result set is empty.
-func (rs *filterResultSet) isEmpty() bool {
-	return len(rs.rs) == 0
-}
-
 // groupingResult represents the grouping context result
 type groupingResult struct {
 	groupingCtx series.GroupingContext
@@ -68,29 +61,6 @@ type groupingResult struct {
 // groupedSeriesResult represents grouped series for group by query
 type groupedSeriesResult struct {
 	groupedSeries map[string][]uint16
-}
-
-// loadSeriesResult represents load series result with loader.
-type loadSeriesResult struct {
-	loaders []flow.DataLoader
-}
-
-// newSeriesResultLoader creates a series load result loader.
-func newSeriesResultLoader(len int) flow.DataLoader {
-	return &loadSeriesResult{
-		loaders: make([]flow.DataLoader, len),
-	}
-}
-
-// Load loads the metric data by given series id from load result.
-func (l *loadSeriesResult) Load(lowSeriesID uint16) [][]byte {
-	var rs [][]byte
-	for _, loader := range l.loaders {
-		if loader != nil {
-			rs = append(rs, loader.Load(lowSeriesID)...)
-		}
-	}
-	return rs
 }
 
 // storageExecutor represents execution search logic in storage level,
@@ -110,6 +80,10 @@ type storageExecutor struct {
 	storageExecutePlan *storageExecutePlan
 
 	queryFlow flow.StorageQueryFlow
+
+	queryTimeRange     timeutil.TimeRange
+	queryInterval      timeutil.Interval
+	queryIntervalRatio int
 
 	// group by query need
 	mutex              sync.Mutex
@@ -181,9 +155,6 @@ func (e *storageExecutor) Execute() {
 
 	storageExecutePlan := plan.(*storageExecutePlan)
 
-	// prepare storage query flow
-	e.queryFlow.Prepare(storageExecutePlan.getDownSamplingAggSpecs())
-
 	e.metricID = storageExecutePlan.metricID
 	e.fields = storageExecutePlan.getFields()
 	e.storageExecutePlan = storageExecutePlan
@@ -191,6 +162,16 @@ func (e *storageExecutor) Execute() {
 		e.groupByTagKeyIDs = e.storageExecutePlan.groupByKeyIDs()
 		e.tagValueIDs = make([]*roaring.Bitmap, len(e.groupByTagKeyIDs))
 	}
+
+	option := e.database.GetOption()
+	var interval timeutil.Interval
+	_ = interval.ValueOf(option.Interval)
+	//TODO need get storage interval by query time if has rollup config
+	e.queryTimeRange, e.queryIntervalRatio, e.queryInterval = downSamplingTimeRange(
+		e.ctx.query.Interval, interval, e.ctx.query.TimeRange)
+
+	// prepare storage query flow
+	e.queryFlow.Prepare(e.queryInterval, e.queryIntervalRatio, e.queryTimeRange, storageExecutePlan.getAggregatorSpecs())
 
 	// execute query flow
 	e.executeQuery()
@@ -212,7 +193,7 @@ func (e *storageExecutor) executeQuery() {
 			seriesIDs := roaring.New()
 			t := newSeriesIDsSearchTask(e.ctx, shard, seriesIDs)
 			err := t.Run()
-			if err != nil && err != constants.ErrNotFound {
+			if err != nil && !errors.Is(err, constants.ErrNotFound) {
 				// maybe series ids not found in shard, so ignore not found err
 				e.queryFlow.Complete(err)
 			}
@@ -221,11 +202,11 @@ func (e *storageExecutor) executeQuery() {
 				return
 			}
 
-			rs := &filterResultSet{}
+			rs := newTimeSpanResultSet()
 			// 2. filter data in memory database
 			t = newMemoryDataFilterTask(e.ctx, shard, e.metricID, e.fields, seriesIDs, rs)
 			err = t.Run()
-			if err != nil && err != constants.ErrNotFound {
+			if err != nil && !errors.Is(err, constants.ErrNotFound) {
 				// maybe data not exist in memory database, so ignore not found err
 				e.queryFlow.Complete(err)
 				return
@@ -233,7 +214,7 @@ func (e *storageExecutor) executeQuery() {
 			// 3. filter data each data family in shard
 			t = newFileDataFilterTask(e.ctx, shard, e.metricID, e.fields, seriesIDs, rs)
 			err = t.Run()
-			if err != nil && err != constants.ErrNotFound {
+			if err != nil && !errors.Is(err, constants.ErrNotFound) {
 				// maybe data not exist in shard, so ignore not found err
 				e.queryFlow.Complete(err)
 				return
@@ -242,11 +223,7 @@ func (e *storageExecutor) executeQuery() {
 				// data not found
 				return
 			}
-			// 4. merge all series ids after filtering => final series ids
-			seriesIDsAfterFilter := roaring.New()
-			for _, result := range rs.rs {
-				seriesIDsAfterFilter.Or(result.SeriesIDs())
-			}
+
 			// 5. execute group by
 			e.pendingForGrouping.Inc()
 			e.queryFlow.Grouping(func() {
@@ -255,7 +232,7 @@ func (e *storageExecutor) executeQuery() {
 					// try start collect tag values
 					e.collectGroupByTagValues()
 				}()
-				e.executeGroupBy(shard, rs, seriesIDsAfterFilter)
+				e.executeGroupBy(shard, rs, rs.getSeriesIDs())
 			})
 		})
 	}
@@ -264,19 +241,20 @@ func (e *storageExecutor) executeQuery() {
 // executeGroupBy executes the query flow, step as below:
 // 1. grouping
 // 2. loading
-func (e *storageExecutor) executeGroupBy(shard tsdb.Shard, rs *filterResultSet, seriesIDs *roaring.Bitmap) {
+func (e *storageExecutor) executeGroupBy(shard tsdb.Shard, rs *timeSpanResultSet, seriesIDs *roaring.Bitmap) {
 	groupingResult := &groupingResult{}
 	var groupingCtx series.GroupingContext
-	// 1. grouping, if has group by, do group by tag keys, else just split series ids as batch first,
-	// get grouping context if need
+	timeSpans := rs.getTimeSpans()
 	if e.ctx.query.HasGroupBy() {
+		// 1. grouping, if has group by, do group by tag keys, else just split series ids as batch first,
+		// get grouping context if need
 		tagKeys := make([]uint32, len(e.groupByTagKeyIDs))
 		for idx, tagKeyID := range e.groupByTagKeyIDs {
 			tagKeys[idx] = tagKeyID.ID
 		}
 		t := newGroupingContextFindTask(e.ctx, shard, tagKeys, seriesIDs, groupingResult)
 		err := t.Run()
-		if err != nil && err != constants.ErrNotFound {
+		if err != nil && !errors.Is(err, constants.ErrNotFound) {
 			// maybe group by not found, so ignore not found err
 			e.queryFlow.Complete(err)
 			return
@@ -290,32 +268,11 @@ func (e *storageExecutor) executeGroupBy(shard tsdb.Shard, rs *filterResultSet, 
 	e.pendingForGrouping.Add(int32(len(keys)))
 	var groupWait atomic.Int32
 	groupWait.Add(int32(len(keys)))
-	resultSet := rs.rs
 
-	for idx, key := range keys {
+	for j, key := range keys {
 		// be carefully, need use new variable for variable scope problem
 		highKey := key
-		containerOfSeries := seriesIDs.GetContainerAtIndex(idx)
-
-		e.queryFlow.Load(func() {
-			loadSeriesRS := newSeriesResultLoader(len(resultSet))
-
-			for idx := range resultSet {
-				// 3.load data by grouped seriesIDs
-				t := newDataLoadTaskFunc(e.ctx, shard, e.queryFlow, resultSet[idx],
-					highKey, containerOfSeries,
-					idx, loadSeriesRS.(*loadSeriesResult))
-				if err := t.Run(); err != nil {
-					e.queryFlow.Complete(err)
-					return
-				}
-			}
-			// scan metric data from storage(memory/file)
-			it := containerOfSeries.PeekableIterator()
-			for it.HasNext() {
-				_ = loadSeriesRS.Load(it.Next())
-			}
-		})
+		containerOfSeries := seriesIDs.GetContainerAtIndex(j)
 
 		// grouping based on group by tag keys for each container
 		e.queryFlow.Grouping(func() {
@@ -336,6 +293,78 @@ func (e *storageExecutor) executeGroupBy(shard tsdb.Shard, rs *filterResultSet, 
 				return
 			}
 
+			e.queryFlow.Load(func() {
+				for _, span := range timeSpans {
+					// 3.load data by grouped seriesIDs
+					t := newDataLoadTaskFunc(e.ctx, shard, e.queryFlow, span,
+						highKey, containerOfSeries)
+					if err := t.Run(); err != nil {
+						e.queryFlow.Complete(err)
+						return
+					}
+				}
+				grouped := groupedResult.groupedSeries
+				fieldSeriesList := make([][]*encoding.TSDDecoder, len(e.fields))
+				fieldAggList := make(aggregation.FieldAggregates, len(e.fields))
+				fieldMerge := make([]aggregation.DownSamplingResult, len(e.fields))
+				aggSpecs := e.storageExecutePlan.getAggregatorSpecs()
+				for idx := range e.fields {
+					fieldSeriesList[idx] = make([]*encoding.TSDDecoder, rs.filterRSCount)
+					fieldAggList[idx] = aggregation.NewSeriesAggregator(
+						e.ctx.query.Interval,
+						e.queryIntervalRatio,
+						e.ctx.query.TimeRange,
+						aggSpecs[idx])
+				}
+				for tags, seriesIDs := range grouped {
+					// scan metric data from storage(memory/file)
+					for _, seriesID := range seriesIDs {
+						for _, span := range timeSpans {
+							// Load loads the metric data by given series id from load result.
+							for i, loader := range span.loaders {
+								// load field series data by series ids
+								dd := fieldSeriesList[i]
+								slotRange2, d := loader.Load(seriesID)
+								for j, data := range d {
+									if data != nil {
+										if dd[j] == nil {
+											dd[j] = encoding.GetTSDDecoder()
+										}
+										dd[j].ResetWithTimeRange(data, slotRange2.Start, slotRange2.End)
+									}
+								}
+							}
+
+							for idx, fieldSeries := range fieldSeriesList {
+								merge := fieldMerge[idx]
+								var agg aggregation.FieldAggregator
+								var ok bool
+								agg, ok = fieldAggList[idx].GetAggregator(span.familyTime)
+								if !ok {
+									continue
+								}
+								if merge == nil {
+									fieldMerge[idx] = aggregation.NewDownSamplingMergeResult(agg)
+								}
+								f := e.fields[idx]
+								start, end := agg.SlotRange()
+								target := timeutil.SlotRange{
+									Start: uint16(start),
+									End:   uint16(end),
+								}
+
+								ds := aggregation.NewDownSamplingAggregator(span.source, target,
+									uint16(e.queryIntervalRatio), fieldMerge[idx])
+								ds.DownSampling(f.Type.GetAggFunc(), fieldSeries)
+								fieldMerge[idx].Reset()
+							}
+						}
+					}
+					e.queryFlow.Reduce(tags, fieldAggList.ResultSet(tags))
+					// reset aggregate context
+					fieldAggList.Reset()
+				}
+			})
 		})
 	}
 }

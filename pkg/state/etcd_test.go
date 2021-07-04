@@ -46,9 +46,11 @@ func TestETCDRepo(t *testing.T) {
 }
 
 func (ts *testEtcdRepoSuite) Test_Write_Read(c *check.C) {
-	var rep, err = newEtedRepository(config.RepoState{
+	var rep, err = newEtcdRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := rep.(*etcdRepository)
+	repo.timeout = time.Second * 10
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -79,10 +81,13 @@ func (ts *testEtcdRepoSuite) Test_Write_Read(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestList(c *check.C) {
-	var rep, err = newEtedRepository(config.RepoState{
+	var rep, err = newEtcdRepository(config.RepoState{
 		Namespace: "/test/list",
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := rep.(*etcdRepository)
+	repo.timeout = time.Second * 10
+
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -102,14 +107,16 @@ func (ts *testEtcdRepoSuite) TestList(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestNew(c *check.C) {
-	_, err := newEtedRepository(config.RepoState{}, "nobody")
+	_, err := newEtcdRepository(config.RepoState{}, "nobody")
 	c.Assert(err, check.NotNil)
 }
 
 func (ts *testEtcdRepoSuite) TestHeartBeat(c *check.C) {
-	b, err := newEtedRepository(config.RepoState{
+	b, err := newEtcdRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
 	if err != nil {
 		c.Fatal(err)
 	}
@@ -140,11 +147,12 @@ func (ts *testEtcdRepoSuite) TestHeartBeat(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestWatch(c *check.C) {
-	b, _ := newEtedRepository(config.RepoState{
+	b, _ := newEtcdRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
 	ctx, cancel := context.WithCancel(context.Background())
-
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
 	// test watch no exist path
 	ch := b.Watch(ctx, "/cluster1/controller/1", true)
 	c.Assert(ch, check.NotNil)
@@ -193,9 +201,11 @@ func (ts *testEtcdRepoSuite) TestWatch(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestGetWatchPrefix(c *check.C) {
-	b, _ := newEtedRepository(config.RepoState{
+	b, _ := newEtcdRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -250,9 +260,12 @@ func (ts *testEtcdRepoSuite) TestGetWatchPrefix(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestElect(c *check.C) {
-	b, _ := newEtedRepository(config.RepoState{
+	b, _ := newEtcdRepository(config.RepoState{
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
+
 	ctx, cancel := context.WithCancel(context.Background())
 	// the key should not exist,it must be success
 	success, ch, err := b.Elect(ctx, "/lindb/breoker/master", []byte("test"), 1)
@@ -299,10 +312,12 @@ func (ts *testEtcdRepoSuite) TestElect(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestBatch(c *check.C) {
-	b, _ := newEtedRepository(config.RepoState{
+	b, _ := newEtcdRepository(config.RepoState{
 		Namespace: "/test/batch",
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
 	batch := Batch{
 		KVs: []KeyValue{
 			{"key1", []byte("value1")},
@@ -317,10 +332,12 @@ func (ts *testEtcdRepoSuite) TestBatch(c *check.C) {
 }
 
 func (ts *testEtcdRepoSuite) TestTransaction(c *check.C) {
-	b, _ := newEtedRepository(config.RepoState{
+	b, _ := newEtcdRepository(config.RepoState{
 		Namespace: "/test/batch",
 		Endpoints: ts.Cluster.Endpoints,
 	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
 
 	txn := b.NewTransaction()
 	txn.Put("test", []byte("value"))
@@ -362,4 +379,48 @@ func (ts *testEtcdRepoSuite) TestTransaction(c *check.C) {
 	c.Assert(err, check.NotNil)
 
 	c.Assert(TxnErr(nil, fmt.Errorf("err")), check.NotNil)
+}
+
+func (ts *testEtcdRepoSuite) TestNextSequence(c *check.C) {
+	b, _ := newEtcdRepository(config.RepoState{
+		Endpoints: ts.Cluster.Endpoints,
+	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Second * 10
+
+	seq, err := repo.NextSequence(context.TODO(), "/test/seq")
+	c.Assert(err, check.IsNil)
+	c.Assert(int64(1), check.Equals, seq)
+	for i := 2; i < 10; i++ {
+		seq, err = repo.NextSequence(context.TODO(), "/test/seq")
+		c.Assert(err, check.IsNil)
+		c.Assert(int64(i), check.Equals, seq)
+	}
+}
+
+func (ts *testEtcdRepoSuite) TestNextSequence_Concurrency(c *check.C) {
+	b, _ := newEtcdRepository(config.RepoState{
+		Endpoints: ts.Cluster.Endpoints,
+	}, "nobody")
+	repo := b.(*etcdRepository)
+	repo.timeout = time.Minute
+
+	var wait sync.WaitGroup
+	wait.Add(10)
+	var rs sync.Map
+	for i := 0; i < 10; i++ {
+		go func() {
+			defer wait.Done()
+			for j := 0; j < 10; j++ {
+				seq, err := repo.NextSequence(context.TODO(), "/test/seq")
+				c.Assert(err, check.IsNil)
+				rs.Store(seq, seq)
+			}
+		}()
+	}
+	wait.Wait()
+	for i := 1; i <= 100; i++ {
+		_, ok := rs.Load(int64(i))
+		c.Assert(ok, check.Equals, ok)
+	}
 }

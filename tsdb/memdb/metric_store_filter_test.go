@@ -18,6 +18,7 @@
 package memdb
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -32,15 +33,15 @@ func TestMetricStore_Filter(t *testing.T) {
 	metricStore := mockMetricStore()
 
 	// case 1: field not found
-	rs, err := metricStore.Filter(nil, field.Metas{{ID: 1}, {ID: 2}})
-	assert.Equal(t, constants.ErrNotFound, err)
+	rs, err := metricStore.Filter(1, nil, field.Metas{{ID: 1}, {ID: 2}})
+	assert.True(t, errors.Is(err, constants.ErrNotFound))
 	assert.Nil(t, rs)
 	// case 3: series ids not found
-	rs, err = metricStore.Filter(roaring.BitmapOf(1, 2), field.Metas{{ID: 1}, {ID: 20, Type: field.SumField}})
-	assert.Equal(t, constants.ErrNotFound, err)
+	rs, err = metricStore.Filter(1, roaring.BitmapOf(1, 2), field.Metas{{ID: 1}, {ID: 20, Type: field.SumField}})
+	assert.True(t, errors.Is(err, constants.ErrNotFound))
 	assert.Nil(t, rs)
 	// case 3: found data
-	rs, err = metricStore.Filter(roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20, Type: field.SumField}})
+	rs, err = metricStore.Filter(1, roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20, Type: field.SumField}})
 	assert.NoError(t, err)
 	assert.NotNil(t, rs)
 	mrs := rs[0].(*memFilterResultSet)
@@ -59,7 +60,7 @@ func TestMemFilterResultSet_Load(t *testing.T) {
 	defer ctrl.Finish()
 	mStore := mockMetricStore()
 
-	rs, err := mStore.Filter(roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20}})
+	rs, err := mStore.Filter(1, roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20}})
 	assert.NoError(t, err)
 	// case 1: load data success
 	loader := rs[0].Load(0, roaring.BitmapOf(100, 200).GetContainer(0))
@@ -67,16 +68,16 @@ func TestMemFilterResultSet_Load(t *testing.T) {
 	loader.Load(100)
 	loader.Load(200)
 	// case 2: series ids not found
-	rs, _ = mStore.Filter(roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20}})
+	rs, _ = mStore.Filter(1, roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20}})
 	loader = rs[0].Load(0, roaring.BitmapOf(1, 2).GetContainer(0))
 	assert.Nil(t, loader)
 	// case 3: high key not exist
-	rs, _ = mStore.Filter(roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20}})
+	rs, _ = mStore.Filter(1, roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 1}, {ID: 20}})
 	loader = rs[0].Load(10, roaring.BitmapOf(1, 2).GetContainer(0))
 	assert.Nil(t, loader)
 	// case 4: field not exist
-	rs, err = mStore.Filter(roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 100}, {ID: 200}})
-	assert.Equal(t, constants.ErrNotFound, err)
+	rs, err = mStore.Filter(1, roaring.BitmapOf(1, 100, 200), field.Metas{{ID: 100}, {ID: 200}})
+	assert.True(t, errors.Is(err, constants.ErrNotFound))
 	assert.Nil(t, rs)
 }
 

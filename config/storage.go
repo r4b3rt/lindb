@@ -44,6 +44,7 @@ type StorageBase struct {
 	GRPC        GRPC      `toml:"grpc"`
 	TSDB        TSDB      `toml:"tsdb"`
 	Query       Query     `toml:"query"`
+	Replica     Replica   `toml:"replica"`
 }
 
 // TOML returns StorageBase's toml config string
@@ -65,6 +66,27 @@ func (s *StorageBase) TOML() string {
 	)
 }
 
+// Replica represents config for data replication in storage.
+type Replica struct {
+	Dir                string         `toml:"dir"`
+	DataSizeLimit      int64          `toml:"data-size-limit"`
+	RemoveTaskInterval ltoml.Duration `toml:"remove-task-interval"`
+	ReportInterval     ltoml.Duration `toml:"report-interval"` // replicator state report interval
+	CheckFlushInterval ltoml.Duration `toml:"check-flush-interval"`
+	FlushInterval      ltoml.Duration `toml:"flush-interval"`
+	BufferSize         int            `toml:"buffer-size"`
+}
+
+func (rc *Replica) GetDataSizeLimit() int64 {
+	if rc.DataSizeLimit <= 1 {
+		return 1024 * 1024 // 1MB
+	}
+	if rc.DataSizeLimit >= 1024 {
+		return 1024 * 1024 * 1024 // 1GB
+	}
+	return rc.DataSizeLimit * 1024 * 1024
+}
+
 // Storage represents a storage configuration with common settings
 type Storage struct {
 	StorageBase StorageBase `toml:"storage"`
@@ -78,7 +100,9 @@ func NewDefaultStorageBase() *StorageBase {
 		Coordinator: RepoState{
 			Namespace:   "/lindb/storage",
 			Endpoints:   []string{"http://localhost:2379"},
-			DialTimeout: ltoml.Duration(time.Second * 5)},
+			Timeout:     ltoml.Duration(time.Second * 10),
+			DialTimeout: ltoml.Duration(time.Second * 5),
+		},
 		GRPC: GRPC{
 			Port: 2891,
 			TTL:  ltoml.Duration(time.Second)},

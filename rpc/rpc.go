@@ -19,6 +19,7 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"sync"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/lindb/lindb/models"
 	"github.com/lindb/lindb/rpc/proto/common"
+	replicaRpc "github.com/lindb/lindb/rpc/proto/replica"
 	"github.com/lindb/lindb/rpc/proto/storage"
 )
 
@@ -37,6 +39,9 @@ const (
 	metaKeyLogicNode = "metaKeyLogicNode"
 	metaKeyDatabase  = "metaKeyDatabase"
 	metaKeyShardID   = "metaKeyShardID"
+	metaKeyLeader    = "metaKeyLeader"
+	metaKeyReplicas  = "metaKeyReplicas"
+	metaKeyReplica   = "metaKeyReplica"
 )
 
 var (
@@ -100,12 +105,22 @@ type ClientStreamFactory interface {
 	CreateTaskClient(target models.Node) (common.TaskService_HandleClient, error)
 	// CreateWriteServiceClient creates a WriteServiceClient
 	CreateWriteServiceClient(target models.Node) (storage.WriteServiceClient, error)
+	// CreateReplicaServiceClient creates a replicaRpc.ReplicaServiceClient.
+	CreateReplicaServiceClient(target models.Node) (replicaRpc.ReplicaServiceClient, error)
 }
 
 // clientStreamFactory implements ClientStreamFactory.
 type clientStreamFactory struct {
 	logicNode models.Node
 	connFct   ClientConnFactory
+}
+
+// NewClientStreamFactory returns a factory to get clientStream.
+func NewClientStreamFactory(logicNode models.Node) ClientStreamFactory {
+	return &clientStreamFactory{
+		logicNode: logicNode,
+		connFct:   GetClientConnFactory(),
+	}
 }
 
 // LogicNode returns the a logic Node which will be transferred to the target server for identification.
@@ -151,12 +166,13 @@ func (w *clientStreamFactory) CreateWriteServiceClient(target models.Node) (stor
 	return storage.NewWriteServiceClient(conn), nil
 }
 
-// NewClientStreamFactory returns a factory to get clientStream.
-func NewClientStreamFactory(logicNode models.Node) ClientStreamFactory {
-	return &clientStreamFactory{
-		logicNode: logicNode,
-		connFct:   GetClientConnFactory(),
+// CreateReplicaServiceClient creates a replicaRpc.ReplicaServiceClient.
+func (w *clientStreamFactory) CreateReplicaServiceClient(target models.Node) (replicaRpc.ReplicaServiceClient, error) {
+	conn, err := w.connFct.GetClientConn(target)
+	if err != nil {
+		return nil, err
 	}
+	return replicaRpc.NewReplicaServiceClient(conn), nil
 }
 
 // createOutgoingContextWithPairs creates outGoing context with key, value pairs.
@@ -193,16 +209,16 @@ func CreateIncomingContextWithNode(ctx context.Context, node models.Node) contex
 	return createIncomingContextWithPairs(ctx, metaKeyLogicNode, node.Indicator())
 }
 
-// CreateOutgoingContext creates outgoing context with logic node.
+// CreateOutgoingContextWithNode creates outgoing context with logic node.
 func CreateOutgoingContextWithNode(ctx context.Context, node models.Node) context.Context {
 	return createOutgoingContextWithPairs(ctx, metaKeyLogicNode, node.Indicator())
 }
 
 // getStringFromContext retrieving string metaValue from context for metaKey.
-func getStringFromContext(cxt context.Context, metaKey string) (string, error) {
-	md, ok := metadata.FromIncomingContext(cxt)
+func getStringFromContext(ctx context.Context, metaKey string) (string, error) {
+	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return "", errors.New("meta data not exists")
+		return "", errors.New("meta data not exists, key: " + metaKey)
 	}
 
 	strList := md.Get(metaKey)
@@ -214,8 +230,8 @@ func getStringFromContext(cxt context.Context, metaKey string) (string, error) {
 }
 
 // GetLogicNodeFromContext returns the logicNode.
-func GetLogicNodeFromContext(cxt context.Context) (*models.Node, error) {
-	strVal, err := getStringFromContext(cxt, metaKeyLogicNode)
+func GetLogicNodeFromContext(ctx context.Context) (*models.Node, error) {
+	strVal, err := getStringFromContext(ctx, metaKeyLogicNode)
 	if err != nil {
 		return nil, err
 	}
@@ -224,13 +240,49 @@ func GetLogicNodeFromContext(cxt context.Context) (*models.Node, error) {
 }
 
 // GetDatabaseFromContext returns database.
-func GetDatabaseFromContext(cxt context.Context) (string, error) {
-	return getStringFromContext(cxt, metaKeyDatabase)
+func GetDatabaseFromContext(ctx context.Context) (string, error) {
+	return getStringFromContext(ctx, metaKeyDatabase)
 }
 
 // GetShardIDFromContext returns shardID.
-func GetShardIDFromContext(cxt context.Context) (int32, error) {
-	strVal, err := getStringFromContext(cxt, metaKeyShardID)
+func GetShardIDFromContext(ctx context.Context) (int32, error) {
+	return getIntFromContext(ctx, metaKeyShardID)
+}
+
+// GetLeaderFromContext returns leader's node id.
+func GetLeaderFromContext(ctx context.Context) (models.NodeID, error) {
+	nodeID, err := getIntFromContext(ctx, metaKeyLeader)
+	if err != nil {
+		return models.NodeID(-1), err
+	}
+	return models.NodeID(nodeID), nil
+}
+
+// GetFollowerFromContext returns follower's node id.
+func GetFollowerFromContext(ctx context.Context) (models.NodeID, error) {
+	nodeID, err := getIntFromContext(ctx, metaKeyReplica)
+	if err != nil {
+		return models.NodeID(-1), err
+	}
+	return models.NodeID(nodeID), nil
+}
+
+// GetReplicasFromContext returns replicas' node id.
+func GetReplicasFromContext(ctx context.Context) ([]models.NodeID, error) {
+	nodeIDs, err := getStringFromContext(ctx, metaKeyReplicas)
+	if err != nil {
+		return nil, err
+	}
+	var replicas []models.NodeID
+	if err := json.Unmarshal([]byte(nodeIDs), &replicas); err != nil {
+		return nil, err
+	}
+	return replicas, nil
+}
+
+// getIntFromContext retrieving int metaValue from context for metaKey.
+func getIntFromContext(ctx context.Context, metaKey string) (int32, error) {
+	strVal, err := getStringFromContext(ctx, metaKey)
 	if err != nil {
 		return -1, err
 	}

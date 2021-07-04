@@ -28,6 +28,7 @@ import (
 	"github.com/lindb/lindb/pkg/logger"
 	"github.com/lindb/lindb/pkg/server"
 
+	"github.com/gin-gonic/gin"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -42,10 +43,15 @@ func run(ctx context.Context, service server.Service) error {
 	// enabled debug log level
 	if debug {
 		logger.RunningAtomicLevel.SetLevel(zapcore.DebugLevel)
+		gin.SetMode(gin.DebugMode)
 		go func() {
-			http.ListenAndServe(":6060", nil)
+			if err := http.ListenAndServe(":6060", nil); err != nil {
+				mainLogger.Error("close debug http listener with err", logger.Error(err))
+			}
 		}()
 		mainLogger.Info("pprof listening on 6060")
+	} else {
+		gin.SetMode(gin.ReleaseMode)
 	}
 
 	// start service
@@ -57,9 +63,7 @@ func run(ctx context.Context, service server.Service) error {
 	<-ctx.Done()
 
 	// stop service
-	if err := service.Stop(); err != nil {
-		return fmt.Errorf("stop service[%s] error:%s", service.Name(), err)
-	}
+	service.Stop()
 
 	return nil
 }

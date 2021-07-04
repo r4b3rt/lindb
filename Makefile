@@ -10,55 +10,62 @@ help:  ## Display this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} \
 		/^[a-zA-Z_-]+:.*?##/ { printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-build-frontend: clean-forntend-build
+build-frontend: clean-frontend-build
 	cd web/ && make web_build
 
-GOOS ?= $(shell go env GOOS)
-GOARCH ?= $(shell go env GOARCH)
-build: clean-build build-lind ## Build executable files. (Args: GOOS=$(go env GOOS) GOARCH=$(go env GOARCH))
+GOARCH = amd64
+build: clean-build build-lind ## Build executable files.
 
-build-all: clean-forntend-build build-frontend clean-build build-lind ## Build executable files with front-end files inside. (Args: GOOS=$(go env GOOS) GOARCH=$(go env GOARCH))
+build-all: clean-frontend-build build-frontend clean-build build-lind ## Build executable files with front-end files inside.
 
-build-lind:
-	env GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o 'bin/lind' $(LD_FLAGS) ./cmd/
+build-lind: ## build lindb binary
+	env GOOS=darwin GOARCH=$(GOARCH) go build -o 'bin/lind-darwin' $(LD_FLAGS) ./cmd/
+	env GOOS=linux GOARCH=$(GOARCH) go build -o 'bin/lind-linux' $(LD_FLAGS) ./cmd/
 
-GOLANGCI_LINT_VERSION ?= "v1.18.0"
 
-pre-test: ## go generate mock file.
-	go install "./ci/mockgen"
+GOLANGCI_LINT_VERSION ?= "v1.28.3"
 
+GOMOCK_VERSION = "v1.5.0"
+
+gomock: ## go generate mock file.
+	go get "github.com/golang/mock/mockgen@$(GOMOCK_VERSION)"
+	go install "github.com/golang/mock/mockgen"
 	go list ./... |grep -v '/gomock' | xargs go generate -v
-	# pb mock is not compatable, so this script is used to mock them via reflect mode
-	# notice: https://github.com/golang/mock/issues/401
-	#         https://github.com/golang/mock/pull/163/files
-	sh rpc/pbmock/mock.sh
 
 header: ## check and add license header.
 	sh license.sh
 
-test: header ## Run test cases. (Args: GOLANGCI_LINT_VERSION=latest)
+lint: ## run lint
 	if [ ! -e ./bin/golangci-lint ]; then \
 		curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | sh -s $(GOLANGCI_LINT_VERSION); \
 	fi
 	./bin/golangci-lint run
-	go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+test-without-lint: ## Run test without lint
+	go get -u github.com/rakyll/gotest
+	export LOG_LEVEL="fatal" ## disable log for test
+	gotest -v -race -coverprofile=coverage.out -covermode=atomic ./...
+
+test: header lint test-without-lint ## Run test cases.
 
 deps:  ## Update vendor.
 	go mod verify
 	go mod tidy -v
-#	rm -rf vendor
-#	go mod vendor -v
 
-generate:  ## generate pb file.
+generate:  ## generate pb/tmpl file.
 	# go get github.com/benbjohnson/tmpl
 	# go install github.com/benbjohnson/tmpl
-	sh ./ci/generate_pb.sh
+	sh ./rpc/pb/generate_pb.sh
 	cd tsdb/template && sh generate_tmpl.sh
 
-clean-build:
-	rm -f bin/lind
+clean-mock: ## remove all mock files
+	find ./ -name "*_mock.go" | xargs rm
 
-clean-forntend-build:
+clean-build:
+	rm -f bin/lind-darwin
+	rm -f bin/lind-linux
+
+clean-frontend-build:
 	cd web/ && make web_clean
 
 clean-tmp: ## clean up tmp and test out files
@@ -69,4 +76,4 @@ clean-tmp: ## clean up tmp and test out files
 	find . -type s -name 'localhost:*' -exec rm -f {} +
 	find . -type s -name '127.0.0.1:*' -exec rm -f {} +
 
-clean: clean-tmp clean-build clean-forntend-build ## Clean up useless files.
+clean: clean-mock clean-tmp clean-build clean-frontend-build ## Clean up useless files.

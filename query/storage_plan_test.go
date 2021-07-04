@@ -103,10 +103,10 @@ func TestStoragePlan_SelectList(t *testing.T) {
 	assert.NoError(t, err)
 
 	storagePlan := plan.(*storageExecutePlan)
-	downSampling := aggregation.NewDownSamplingSpec("f", field.SumField)
+	downSampling := aggregation.NewAggregatorSpec("f", field.SumField)
 	downSampling.AddFunctionType(function.Sum)
-	assert.Equal(t, map[field.ID]aggregation.AggregatorSpec{field.ID(10): downSampling}, storagePlan.fields)
-	assert.Equal(t, field.Metas{{ID: 10, Type: field.SumField}}, storagePlan.getFields())
+	assert.Equal(t, downSampling, storagePlan.fields[field.ID(10)].DownSampling)
+	assert.Equal(t, field.Metas{{Name: "f", ID: 10, Type: field.SumField}}, storagePlan.getFields())
 
 	q, _ = sql.Parse("select a,b,c as d from cpu")
 	query = q.(*stmt.Query)
@@ -115,23 +115,20 @@ func TestStoragePlan_SelectList(t *testing.T) {
 	assert.NoError(t, err)
 
 	storagePlan = plan.(*storageExecutePlan)
-	downSampling1 := aggregation.NewDownSamplingSpec("a", field.MinField)
+	downSampling1 := aggregation.NewAggregatorSpec("a", field.MinField)
 	downSampling1.AddFunctionType(function.Min)
-	downSampling2 := aggregation.NewDownSamplingSpec("b", field.MaxField)
+	downSampling2 := aggregation.NewAggregatorSpec("b", field.MaxField)
 	downSampling2.AddFunctionType(function.Max)
-	downSampling3 := aggregation.NewDownSamplingSpec("c", field.HistogramField)
+	downSampling3 := aggregation.NewAggregatorSpec("c", field.HistogramField)
 	downSampling3.AddFunctionType(function.Histogram)
-	expect := map[field.ID]aggregation.AggregatorSpec{
-		field.ID(11): downSampling1,
-		field.ID(12): downSampling2,
-		field.ID(13): downSampling3,
-	}
-	assert.Equal(t, expect, storagePlan.fields)
+	assert.Equal(t, downSampling1, storagePlan.fields[field.ID(11)].DownSampling)
+	assert.Equal(t, downSampling2, storagePlan.fields[field.ID(12)].DownSampling)
+	assert.Equal(t, downSampling3, storagePlan.fields[field.ID(13)].DownSampling)
 	assert.Equal(t,
 		field.Metas{
-			{ID: 11, Type: field.MinField},
-			{ID: 12, Type: field.MaxField},
-			{ID: 13, Type: field.HistogramField},
+			{Name: "a", ID: 11, Type: field.MinField},
+			{Name: "b", ID: 12, Type: field.MaxField},
+			{Name: "c", ID: 13, Type: field.HistogramField},
 		},
 		storagePlan.getFields())
 
@@ -142,24 +139,21 @@ func TestStoragePlan_SelectList(t *testing.T) {
 	assert.NoError(t, err)
 	storagePlan = plan.(*storageExecutePlan)
 
-	downSampling1 = aggregation.NewDownSamplingSpec("a", field.MinField)
+	downSampling1 = aggregation.NewAggregatorSpec("a", field.MinField)
 	downSampling1.AddFunctionType(function.Min)
-	downSampling3 = aggregation.NewDownSamplingSpec("c", field.HistogramField)
+	downSampling3 = aggregation.NewAggregatorSpec("c", field.HistogramField)
 	downSampling3.AddFunctionType(function.Sum)
 	downSampling3.AddFunctionType(function.Avg)
-	downSampling4 := aggregation.NewDownSamplingSpec("e", field.HistogramField)
+	downSampling4 := aggregation.NewAggregatorSpec("e", field.HistogramField)
 	downSampling4.AddFunctionType(function.Histogram)
-	expect = map[field.ID]aggregation.AggregatorSpec{
-		field.ID(11): downSampling1,
-		field.ID(13): downSampling3,
-		field.ID(14): downSampling4,
-	}
-	assert.Equal(t, expect, storagePlan.fields)
+	assert.Equal(t, downSampling1, storagePlan.fields[field.ID(11)].DownSampling)
+	assert.Equal(t, downSampling3, storagePlan.fields[field.ID(13)].DownSampling)
+	assert.Equal(t, downSampling4, storagePlan.fields[field.ID(14)].DownSampling)
 	assert.Equal(t,
 		field.Metas{
-			{ID: 11, Type: field.MinField},
-			{ID: 13, Type: field.HistogramField},
-			{ID: 14, Type: field.HistogramField},
+			{Name: "a", ID: 11, Type: field.MinField},
+			{Name: "c", ID: 13, Type: field.HistogramField},
+			{Name: "e", ID: 14, Type: field.HistogramField},
 		},
 		storagePlan.getFields())
 }
@@ -193,7 +187,7 @@ func TestStorageExecutePlan_groupBy(t *testing.T) {
 	assert.Equal(t, field.Name("d"), aggSpecs[0].FieldName())
 	assert.Equal(t, field.Name("f"), aggSpecs[1].FieldName())
 
-	assert.Equal(t, field.Metas{{ID: 10, Type: field.SumField}, {ID: 12, Type: field.SumField}}, storagePlan.getFields())
+	assert.Equal(t, field.Metas{{Name: "d", ID: 10, Type: field.SumField}, {Name: "f", ID: 12, Type: field.SumField}}, storagePlan.getFields())
 	assert.Equal(t, 2, len(storagePlan.groupByTags))
 	assert.Equal(t, []tag.Meta{{ID: 10, Key: "host"}, {ID: 11, Key: "path"}}, storagePlan.groupByKeyIDs())
 

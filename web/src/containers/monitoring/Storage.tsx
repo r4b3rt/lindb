@@ -1,8 +1,8 @@
 import { Card, Form } from 'antd'
-import ServerRoleSelect from 'components/meta/ServerRole'
 import ViewBoard from 'components/metric/ViewBoard'
 import { WriteDashboard } from 'config/monitoring/Storage'
 import * as React from 'react'
+import TagValuesSelect from "components/meta/TagValues";
 
 interface StorageProps {
 }
@@ -10,7 +10,7 @@ interface StorageProps {
 interface StorageState {
 }
 
-export default class MonitoringSystem extends React.Component<StorageProps, StorageState> {
+export default class MonitoringStorage extends React.Component<StorageProps, StorageState> {
 
   render() {
     return (
@@ -21,8 +21,8 @@ export default class MonitoringSystem extends React.Component<StorageProps, Stor
               width: "calc(100%)",
               textAlign: "left",
             }} >
-            <Form.Item label="Server Role">
-              <ServerRoleSelect />
+            <Form.Item label="Node">
+              <TagValuesSelect measurement="system_cpu_stat" tagKey="node' where role='storage" mode="tags"/>
             </Form.Item>
           </Form>
         </Card>

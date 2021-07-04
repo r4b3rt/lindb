@@ -36,7 +36,7 @@ const (
 	Count
 	Min
 	Max
-	Replace
+	LastValue
 )
 
 // Type represents field type for LinDB support
@@ -44,15 +44,14 @@ type Type uint8
 
 // Defines all field types for LinDB support(user write)
 const (
-	SumField Type = iota + 1
+	Unknown Type = iota
+	SumField
 	MinField
 	MaxField
 	GaugeField
 	IncreaseField
 	SummaryField
 	HistogramField
-
-	Unknown
 )
 
 // String returns the field type's string value
@@ -87,7 +86,8 @@ func (t Type) GetAggFunc() AggFunc {
 	case MaxField:
 		return maxAggregator
 	default:
-		return nil
+		//FIXME(stone1100)
+		return maxAggregator
 	}
 }
 
@@ -100,7 +100,7 @@ func (t Type) DownSamplingFunc() function.FuncType {
 	case MaxField:
 		return function.Max
 	case GaugeField:
-		return function.Replace
+		return function.LastValue
 	case IncreaseField:
 		return function.Sum
 	case SummaryField:
@@ -137,7 +137,7 @@ func (t Type) IsFuncSupported(funcType function.FuncType) bool {
 		}
 	case GaugeField:
 		switch funcType {
-		case function.Sum, function.Min, function.Max, function.Replace:
+		case function.Sum, function.Min, function.Max, function.LastValue:
 			return true
 		default:
 			return false
@@ -151,13 +151,28 @@ func (t Type) IsFuncSupported(funcType function.FuncType) bool {
 	}
 }
 
-// GetFuncFieldParams returns the fields for aggregator's function params.
+// GetFuncFieldParams returns agg type for field aggregator by given function type.
 func (t Type) GetFuncFieldParams(funcType function.FuncType) []AggType {
 	switch t {
 	case SumField:
 		return getFieldParamsForSumField(funcType)
 	case MinField:
 		return getFieldParamsForMinField(funcType)
+	case GaugeField:
+		return getFieldParamsForGaugeField(funcType)
+	}
+	return nil
+}
+
+// GetDefaultFuncFieldParams returns default agg type for field aggregator.
+func (t Type) GetDefaultFuncFieldParams() []AggType {
+	switch t {
+	case SumField:
+		return []AggType{Sum}
+	case MinField:
+		return []AggType{Min}
+	case GaugeField:
+		return []AggType{LastValue}
 	}
 	return nil
 }
@@ -177,5 +192,14 @@ func getFieldParamsForMinField(funcType function.FuncType) []AggType {
 		return []AggType{Max}
 	default:
 		return []AggType{Min}
+	}
+}
+
+func getFieldParamsForGaugeField(funcType function.FuncType) []AggType {
+	switch funcType {
+	case function.Max:
+		return []AggType{Max}
+	default:
+		return []AggType{LastValue}
 	}
 }

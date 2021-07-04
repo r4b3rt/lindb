@@ -24,8 +24,8 @@ import (
 	"os"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/gogo/protobuf/proto"
-	"github.com/gorilla/mux"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	promreporter "github.com/uber-go/tally/prometheus"
@@ -75,7 +75,7 @@ var hostName = os.Hostname
 type runtime struct {
 	state   server.State
 	version string
-	config  config.Storage
+	config  *config.Storage
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -97,7 +97,7 @@ type runtime struct {
 }
 
 // NewStorageRuntime creates storage runtime
-func NewStorageRuntime(version string, config config.Storage) server.Service {
+func NewStorageRuntime(version string, config *config.Storage) server.Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &runtime{
 		state:       server.New,
@@ -121,7 +121,7 @@ func (r *runtime) Run() error {
 	ip, err := getHostIP()
 	if err != nil {
 		r.state = server.Failed
-		return fmt.Errorf("cannot get server ip address, error:%s", err)
+		return fmt.Errorf("failed to get server ip address, error: %s", err)
 	}
 
 	// build service dependency for storage server
@@ -131,7 +131,7 @@ func (r *runtime) Run() error {
 	}
 	hostName, err := hostName()
 	if err != nil {
-		r.log.Error("get host name with error", logger.Error(err))
+		r.log.Error("failed to get host name", logger.Error(err))
 		hostName = "unknown"
 	}
 	r.node = models.Node{
@@ -150,6 +150,7 @@ func (r *runtime) Run() error {
 
 	// start state repo
 	if err := r.startStateRepo(); err != nil {
+		r.log.Error("failed to startStateRepo", logger.Error(err))
 		r.state = server.Failed
 		return err
 	}
@@ -188,55 +189,69 @@ func (r *runtime) startStateRepo() error {
 }
 
 // Stop stops storage server
-func (r *runtime) Stop() error {
+func (r *runtime) Stop() {
+	r.log.Info("stopping storage server...")
 	defer r.cancel()
 
 	if r.pusher != nil {
 		r.pusher.Stop()
+		r.log.Info("stopped prometheus pusher successfully")
 	}
 
 	if r.taskExecutor != nil {
+		r.log.Info("stopping task executor")
 		if err := r.taskExecutor.Close(); err != nil {
-			r.log.Error("close task executor error", logger.Error(err))
+			r.log.Error("stopped task executor with error", logger.Error(err))
+		} else {
+			r.log.Info("stooped task executor successfully")
 		}
 	}
 
 	// close registry, deregister storage node from active list
 	if r.registry != nil {
+		r.log.Info("closing discovery-registry...")
 		if err := r.registry.Close(); err != nil {
 			r.log.Error("unregister storage node error", logger.Error(err))
+		} else {
+			r.log.Info("closed discovery-registry successfully")
 		}
 	}
 
 	// close state repo if exist
 	if r.repo != nil {
-		r.log.Info("closing state repo")
+		r.log.Info("closing state repo...")
 		if err := r.repo.Close(); err != nil {
 			r.log.Error("close state repo error, when storage stop", logger.Error(err))
+		} else {
+			r.log.Info("closed state repo successfully")
 		}
 	}
 
 	if r.httpServer != nil {
-		r.log.Info("starting shutdown http server")
+		r.log.Info("stopping http server...")
 		if err := r.httpServer.Shutdown(r.ctx); err != nil {
-			r.log.Error("shutdown http server error", logger.Error(err))
+			r.log.Error("stopped http server with error", logger.Error(err))
+		} else {
+			r.log.Info("stopped http server successfully")
 		}
 	}
 
 	// finally shutdown rpc server
 	if r.server != nil {
-		r.log.Info("stopping grpc server")
+		r.log.Info("stopping GRPC server...")
 		r.server.Stop()
+		r.log.Info("stopped GRPC server")
 	}
 
 	// close the storage engine
 	if r.srv.storageService != nil {
+		r.log.Info("stopping storage engine...")
 		r.srv.storageService.Close()
+		r.log.Info("stopped storage engine")
 	}
 
-	r.log.Info("storage server stop complete")
+	r.log.Info("stopped storage server successfully")
 	r.state = server.Terminated
-	return nil
 }
 
 // buildServiceDependency builds broker service dependency
@@ -259,15 +274,18 @@ func (r *runtime) startHTTPServer() {
 
 	// add prometheus metric report
 	reporter := promreporter.NewReporter(promreporter.Options{})
-	router := mux.NewRouter().StrictSlash(true)
-	router.Handle("/metrics", reporter.HTTPHandler())
+	h := reporter.HTTPHandler()
+	g := gin.New()
+	g.GET("/metrics", func(c *gin.Context) {
+		h.ServeHTTP(c.Writer, c.Request)
+	})
 
 	r.httpServer = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
 		WriteTimeout: time.Second * 15,
 		ReadTimeout:  time.Second * 15,
 		IdleTimeout:  time.Second * 60,
-		Handler:      router,
+		Handler:      g,
 	}
 	go func() {
 		if err := r.httpServer.ListenAndServe(); err != http.ErrServerClosed {
@@ -308,40 +326,31 @@ func (r *runtime) bindRPCHandlers() {
 }
 
 func (r *runtime) monitoring() {
-	systemStatMonitorEnabled := r.config.Monitor.SystemReportInterval > 0
-	if systemStatMonitorEnabled {
-		r.log.Info("SystemStatMonitor is running")
-		go monitoring.NewSystemCollector(
-			r.ctx,
-			r.config.Monitor.SystemReportInterval.Duration(),
-			r.config.StorageBase.TSDB.Dir,
-			r.repo,
-			constants.GetNodeMonitoringStatPath(r.node.Indicator()),
-			models.ActiveNode{
-				Version:    r.version,
-				Node:       r.node,
-				OnlineTime: timeutil.Now(),
-			}).Run()
+	monitorEnabled := r.config.Monitor.ReportInterval > 0
+	if !monitorEnabled {
+		r.log.Info("monitor report-interval sets to 0, exit")
+		return
 	}
+	r.log.Info("monitor is running",
+		logger.String("interval", r.config.Monitor.ReportInterval.String()))
 
-	if !config.StandaloneMode {
-		// disable if run as standalone, because broker start same monitoring
-		runtimeStatMonitorEnabled := r.config.Monitor.RuntimeReportInterval > 0
-		if runtimeStatMonitorEnabled {
-			r.log.Info("RuntimeStatMonitor is running")
-			go monitoring.NewRunTimeCollector(
-				r.ctx,
-				r.config.Monitor.RuntimeReportInterval.Duration(),
-				map[string]string{"role": "broker", "version": r.version},
-			)
-		}
-	}
+	go monitoring.NewSystemCollector(
+		r.ctx,
+		r.config.Monitor.ReportInterval.Duration(),
+		r.config.StorageBase.TSDB.Dir,
+		r.repo,
+		constants.GetNodeMonitoringStatPath(r.node.Indicator()),
+		models.ActiveNode{
+			Version:    r.version,
+			Node:       r.node,
+			OnlineTime: timeutil.Now(),
+		}).Run()
 
 	r.pusher = monitoring.NewPrometheusPusher(
 		r.ctx,
 		r.config.Monitor.URL,
-		r.config.Monitor.RuntimeReportInterval.Duration(),
-		prometheus.Gatherers{monitoring.StorageGatherer, prometheus.DefaultGatherer},
+		r.config.Monitor.ReportInterval.Duration(),
+		prometheus.Gatherers{monitoring.StorageGatherer},
 		[]*dto.LabelPair{
 			{
 				Name:  proto.String("role"),

@@ -62,8 +62,11 @@ type storageStateMachine struct {
 }
 
 // NewStorageStateMachine creates state machine, init data if exist, then starts watch change event
-func NewStorageStateMachine(ctx context.Context,
-	discoveryFactory discovery.Factory, taskClientFactory rpc.TaskClientFactory) (StorageStateMachine, error) {
+func NewStorageStateMachine(
+	ctx context.Context,
+	discoveryFactory discovery.Factory,
+	taskClientFactory rpc.TaskClientFactory,
+) (StorageStateMachine, error) {
 	c, cancel := context.WithCancel(ctx)
 	log := storageFSMLogger
 	stateMachine := &storageStateMachine{
@@ -105,7 +108,7 @@ func (s *storageStateMachine) List() []*models.StorageState {
 }
 
 // OnCreate modifies storage cluster's state, such as trigger by node online/offline event
-func (s *storageStateMachine) OnCreate(key string, resource []byte) {
+func (s *storageStateMachine) OnCreate(_ string, resource []byte) {
 	s.addCluster(resource)
 }
 
@@ -158,7 +161,7 @@ func (s *storageStateMachine) addCluster(resource []byte) {
 	//TODO need check if same state, maybe state is same, such as system start
 	state, ok := s.storageClusters[storageState.Name]
 	if !ok {
-		state = newStorageClusterState(s.taskClientFactory)
+		state = newStorageClusterState(s.taskClientFactory, storageFSMLogger)
 		s.storageClusters[storageState.Name] = state
 	}
 	state.SetState(storageState)

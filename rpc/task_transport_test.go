@@ -26,7 +26,6 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/lindb/lindb/models"
-	commonmock "github.com/lindb/lindb/rpc/pbmock/common"
 	"github.com/lindb/lindb/rpc/proto/common"
 )
 
@@ -40,7 +39,7 @@ func TestTaskServerFactory(t *testing.T) {
 	stream := fct.GetStream((&node).Indicator())
 	assert.Nil(t, stream)
 
-	mockServerStream := commonmock.NewMockTaskService_HandleServer(ctl)
+	mockServerStream := common.NewMockTaskService_HandleServer(ctl)
 
 	epoch := fct.Register((&node).Indicator(), mockServerStream)
 	stream = fct.GetStream((&node).Indicator())
@@ -68,10 +67,10 @@ func TestTaskClientFactory(t *testing.T) {
 
 	mockClientConnFct := NewMockClientConnFactory(ctl)
 
-	mockTaskClient := commonmock.NewMockTaskService_HandleClient(ctl)
+	mockTaskClient := common.NewMockTaskService_HandleClient(ctl)
 	mockTaskClient.EXPECT().Recv().Return(nil, nil).AnyTimes()
 	mockTaskClient.EXPECT().CloseSend().Return(fmt.Errorf("err")).AnyTimes()
-	taskService := commonmock.NewMockTaskServiceClient(ctl)
+	taskService := common.NewMockTaskServiceClient(ctl)
 
 	fct := NewTaskClientFactory(models.Node{IP: "127.0.0.1", Port: 123})
 	receiver := NewMockTaskReceiver(ctl)
@@ -103,7 +102,16 @@ func TestTaskClientFactory(t *testing.T) {
 	cli := fct.GetTaskClient((&target).Indicator())
 	assert.NotNil(t, cli)
 
-	fct.CloseTaskClient((&target).Indicator())
+	cli = fct.GetTaskClient((&models.Node{IP: "", Port: testGRPCPort}).Indicator())
+	assert.Nil(t, cli)
+
+	closed, err := fct.CloseTaskClient((&target).Indicator())
+	assert.NotNil(t, err)
+	assert.False(t, closed)
+
+	closed, err = fct.CloseTaskClient((&models.Node{IP: "127.0.0.1", Port: 1000}).Indicator())
+	assert.Nil(t, err)
+	assert.False(t, closed)
 }
 
 func TestTaskClientFactory_handler(t *testing.T) {
@@ -119,9 +127,9 @@ func TestTaskClientFactory_handler(t *testing.T) {
 	target := models.Node{IP: "127.0.0.1", Port: 321}
 	conn, _ := grpc.Dial(target.Indicator(), grpc.WithInsecure())
 	mockClientConnFct := NewMockClientConnFactory(ctrl)
-	mockTaskClient := commonmock.NewMockTaskService_HandleClient(ctrl)
+	mockTaskClient := common.NewMockTaskService_HandleClient(ctrl)
 	mockTaskClient.EXPECT().CloseSend().Return(fmt.Errorf("err")).AnyTimes()
-	taskService := commonmock.NewMockTaskServiceClient(ctrl)
+	taskService := common.NewMockTaskServiceClient(ctrl)
 
 	factory := fct.(*taskClientFactory)
 	factory.newTaskServiceClientFunc = func(cc *grpc.ClientConn) common.TaskServiceClient {
